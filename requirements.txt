@@ -1,0 +1,16 @@
+# KAPASITE - Proje bağımlılıkları
+# Dash & UI (Bootstrap dahil)
+dash>=2.14.0
+dash-bootstrap-components>=1.5.0
+dash-ag-grid>=1.2.0
+
+# Veri & grafik
+pandas>=2.0.0
+plotly>=5.18.0
+
+# Excel export
+openpyxl>=3.1.0
+
+# Dash bağımlılıkları (Flask vb. otomatik gelir; gerekirse aşağıya ekleyin)
+# SQL Server (run/agent.py)
+pyodbc>=4.0.0

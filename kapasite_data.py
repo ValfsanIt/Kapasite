@@ -1,0 +1,510 @@
+# -*- coding: utf-8 -*-
+
+from datetime import datetime, timedelta
+import pandas as pd
+
+
+def get_kolon_list_from_format3(format3_str):
+    
+    if not format3_str:
+        return []
+    return [x.strip() for x in format3_str.split(",") if x.strip()]
+
+
+def _to_numeric_slice(df, start_col_index=1):
+    if df is None or df.empty:
+        return
+    for i in range(start_col_index, len(df.columns)):
+        col = df.columns[i]
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+
+def _div_safe(df, start_col_index, divisor):
+    if df is None or df.empty or start_col_index >= df.shape[1]:
+        return
+    num_part = df.iloc[:, start_col_index:].apply(pd.to_numeric, errors="coerce")
+    df.iloc[:, start_col_index:] = num_part / divisor
+
+
+
+def generate_weekly_columns():
+    """Haftalık kolonlar (İhtiyaç/Sipariş). Verimlilik sadece yük tablosunda VLFVARDIYASURE'dan kolon olarak eklenir."""
+    start_date = datetime.now() - timedelta(weeks=1)
+    format1, format2, format3, format4 = [], [], [], []
+    for i in range(19):
+        week_start = start_date + timedelta(weeks=i)
+        year, week_num, _ = week_start.isocalendar()
+        wk = f"{year}-{str(week_num).zfill(2)}"
+        if i == 0:
+            format1.append(f"0 AS [{wk}]")
+        else:
+            format1.append(f"SUM(B.[{wk}]) AS [{wk}]")
+        format2.append(f"SUM([{wk}]) AS [{wk}], SUM([{wk}A]) AS [{wk}A]")
+        format3.append(f"{wk}, {wk}A")
+        if i == 0:
+            format4.append(f"0 AS [{wk}]")
+        else:
+            format4.append(
+                f"CAST(CEILING((CAST(SUM(A.[{wk}]) AS DECIMAL(18, 3))/CAST(SUM(B.[{wk}]) AS DECIMAL(18, 3)))*100) AS int) AS [{wk}]"
+            )
+    return {
+        "format1": ", ".join(format1),
+        "format2": ", ".join(format2),
+        "format3": ", ".join(format3),
+        "format4": ", ".join(format4),
+    }
+
+
+def generate_monthly_columns():
+    """Aylık kolonlar (Öngörü). Verimlilik sadece yük tablosunda kolon olarak eklenir."""
+    today = datetime.today()
+    start_year = today.year
+    end_year = start_year + 1
+    format1, format2, format3, format4 = [], [], [], []
+    current_date = datetime(start_year, 1, 1)
+    end_date = datetime(end_year, 12, 1)
+    while current_date <= end_date:
+        ym = f"{current_date.year}-{str(current_date.month).zfill(2)}"
+        format1.append(f"SUM(B.[{ym}]) AS [{ym}]")
+        format2.append(f"SUM([{ym}]) AS [{ym}], SUM([{ym}A]) AS [{ym}A]")
+        format3.append(ym)
+        format3.append(f"{ym}A")
+        format4.append(
+            f"CAST(CEILING((CAST(SUM(A.[{ym}]) AS DECIMAL(18, 3))/"
+            f"CASE WHEN CAST(SUM(B.[{ym}]) AS DECIMAL(18, 3)) = 0 "
+            f"THEN 1 ELSE CAST(SUM(B.[{ym}]) AS DECIMAL(18, 3)) END)*100) AS int) AS [{ym}]"
+        )
+        next_month = current_date.month + 1
+        next_year = current_date.year + (1 if next_month > 12 else 0)
+        next_month = 1 if next_month > 12 else next_month
+        current_date = datetime(next_year, next_month, 1)
+    return {
+        "format1": ", ".join(format1),
+        "format2": ", ".join(format2),
+        "format3": ", ".join(format3),
+        "format4": ", ".join(format4),
+    }
+
+
+def get_table_columns(ag_instance, table_name):
+   
+    if not ag_instance or not table_name:
+        return set()
+    try:
+        df = ag_instance.run_query(f"SELECT TOP 1 * FROM [{table_name}]")
+        if df is None or df.empty:
+            return set()
+        return set(df.columns.tolist())
+    except Exception:
+        return set()
+
+
+
+VERIMLILIK_SQL = "SELECT WORKCENTER, [VERIMLILIK] AS Verimlilik FROM [VLFVARDIYASURE]"
+
+
+def get_verimlilik_df(ag_instance):
+   
+    if not ag_instance:
+        return None
+    try:
+        df = ag_instance.run_query(VERIMLILIK_SQL)
+        if df is None or df.empty or "Verimlilik" not in df.columns:
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def generate_monthly_columns_filtered(ag_instance, table_name, capacity_table_name):
+    
+    raw = generate_monthly_columns()
+    table_set = get_table_columns(ag_instance, table_name)
+    cap_set = get_table_columns(ag_instance, capacity_table_name)
+    if not table_set and not cap_set:
+        return raw
+    format1, format2, format3 = [], [], []
+    seen = set()
+    for part in raw["format3"].split(","):
+        ym = part.strip()
+        if not ym or ym.endswith("A"):
+            continue
+        if ym in seen:
+            continue
+        seen.add(ym)
+        if ym in table_set and f"{ym}A" in table_set:
+            format2.append(f"SUM([{ym}]) AS [{ym}], SUM([{ym}A]) AS [{ym}A]")
+            format3.append(ym)
+            format3.append(f"{ym}A")
+        if ym in cap_set:
+            format1.append(f"SUM(B.[{ym}]) AS [{ym}]")
+    if not format2 and table_set:
+        ay_cols = sorted(
+            c for c in table_set
+            if len(c) >= 7 and c[4] == "-"
+            and (c.replace("-", "")[:6].isdigit() or (c.endswith("A") and c[:-1].replace("-", "")[:6].isdigit()))
+        )
+        for ym in ay_cols:
+            if ym.endswith("A"):
+                continue
+            if f"{ym}A" in table_set:
+                format2.append(f"SUM([{ym}]) AS [{ym}], SUM([{ym}A]) AS [{ym}A]")
+                format3.append(ym)
+                format3.append(f"{ym}A")
+    if not format1 and cap_set:
+        ay_cap = sorted(c for c in cap_set if len(c) >= 7 and c[4] == "-" and c.replace("-", "")[:6].isdigit())
+        format1 = [f"SUM(B.[{c}]) AS [{c}]" for c in ay_cap]
+    return {
+        "format1": ", ".join(format1) if format1 else raw["format1"],
+        "format2": ", ".join(format2) if format2 else raw["format2"],
+        "format3": ", ".join(format3) if format3 else raw["format3"],
+    }
+
+
+
+def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, costcenter,
+                                kolon_sum, kolon_sumb, kolon_list, selected_units=("hours",), cap_grp=None):
+    """Kapasite süresi tablosu (1. / 2. accordion). Kolon/sorgu/hesaplama değişikliği burada yapılır; hem dashboard hem rapor buradan beslenir."""
+    if not costcenter or not table_name or not kolon_sum:
+        return None
+    try:
+        where_cc = f"STAND = '{costcenter}'"
+        if cap_grp and cap_grp != "Kapasite Grubu":
+            where_cc = f"CAPGRUP = '{cap_grp}' AND STAND = '{costcenter}'"
+            sub_extra = ",CAPGRUP"
+            where_extra = f" AND A.CAPGRUP = '{cap_grp}'"
+        else:
+            sub_extra = ""
+            where_extra = ""
+        ihtiyac_sql = (
+            f"SELECT STAND,{kolon_sum} FROM {table_name} "
+            f"WHERE {where_cc} GROUP BY STAND ORDER BY STAND"
+        )
+        cap_work_sql = (
+            f"SELECT {kolon_sumb} FROM (SELECT STAND,CAPWORK{sub_extra} FROM {table_name} "
+            f"GROUP BY CAPWORK,STAND{sub_extra}) A LEFT JOIN {capacity_table_name} B ON A.CAPWORK = B.WORKCENTER "
+            f"WHERE A.STAND = '{costcenter}'{where_extra} GROUP BY A.STAND"
+        )
+        sum_df = ag_instance.run_query(ihtiyac_sql)
+        sum_df_cap_work = ag_instance.run_query(cap_work_sql)
+        if sum_df is None or sum_df.empty or sum_df_cap_work is None or sum_df_cap_work.empty:
+            return None
+
+        selected_units = selected_units or ["hours"]
+        if "hours" in selected_units:
+            _div_safe(sum_df, 1, 60)
+            sum_df = sum_df.round(1)
+        elif "shifts" in selected_units:
+            _div_safe(sum_df, 1, 510)
+            sum_df = sum_df.round(1)
+
+        sum_df["STAT"] = "Kapasite İhtiyacı"
+        weeks = [c for c in kolon_list if c in sum_df.columns]
+        if not weeks:
+            weeks = [c for c in sum_df.columns if c not in ("STAND", "STAT")]
+        filtered_sum_df = sum_df[["STAT"] + weeks].copy()
+
+        if sum_df_cap_work.shape[1] > 0:
+            if "hours" in selected_units:
+                _div_safe(sum_df_cap_work, 0, 60)
+                sum_df_cap_work = sum_df_cap_work.round(1)
+            elif "shifts" in selected_units:
+                _div_safe(sum_df_cap_work, 0, 510)
+                sum_df_cap_work = sum_df_cap_work.round(1)
+            else:
+                _to_numeric_slice(sum_df_cap_work, 0)
+                sum_df_cap_work = sum_df_cap_work.round(0)
+
+        toplam_row = {"STAT": "Toplam Kapasite"}
+        toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
+        cap_df = pd.concat([filtered_sum_df, pd.DataFrame([toplam_row])], ignore_index=True)
+
+        fark_row = {"STAT": "Kapasite Farkı"}
+        for col in weeks:
+            try:
+                fark_row[col] = round(
+                    float(cap_df.loc[cap_df["STAT"] == "Toplam Kapasite", col].iloc[0])
+                    - float(cap_df.loc[cap_df["STAT"] == "Kapasite İhtiyacı", col].iloc[0]),
+                    1 if "hours" in selected_units or "shifts" in selected_units else 0,
+                )
+            except Exception:
+                fark_row[col] = 0
+        cap_df = pd.concat([cap_df, pd.DataFrame([fark_row])], ignore_index=True)
+
+        numeric_cols = [c for c in cap_df.columns if c != "STAT"]
+        cumsum = cap_df.loc[cap_df["STAT"] == "Kapasite Farkı", numeric_cols].cumsum(axis=1)
+        cum_row = {"STAT": "Kümülatif Toplam"}
+        cum_row.update(cumsum.iloc[0].to_dict())
+        cum_row = {k: (round(v, 1) if isinstance(v, (int, float)) else v) for k, v in cum_row.items()}
+        cap_df = pd.concat([cap_df, pd.DataFrame([cum_row])], ignore_index=True)
+
+        ui_row = cap_df[cap_df["STAT"] == "Kapasite İhtiyacı"].iloc[0]
+        tk_row = cap_df[cap_df["STAT"] == "Toplam Kapasite"].iloc[0]
+        doluluk_vals = []
+        for col in weeks:
+            try:
+                tk = float(tk_row[col])
+                ui = float(ui_row[col])
+                doluluk_vals.append(round((ui / tk) * 100, 1) if tk != 0 else 0)
+            except Exception:
+                doluluk_vals.append(0)
+        doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks)
+        doluluk_df["STAT"] = "Doluluk Oranı(%)"
+        cap_df = pd.concat([cap_df, doluluk_df], ignore_index=True)
+        return cap_df
+    except Exception as e:
+        print(f"kapasite_data build_capacity_table_for_cc hatası: {e}")
+        return None
+
+
+def get_workcenters_for_cc(ag_instance, table_name, costcenter):
+    """Verilen cost center için tablodaki tüm CAPWORK (workcenter) listesini döndürür."""
+    if not ag_instance or not table_name or not costcenter:
+        return []
+    try:
+        df = ag_instance.run_query(
+            f"SELECT DISTINCT CAPWORK FROM [{table_name}] WHERE STAND = '{costcenter}' ORDER BY CAPWORK"
+        )
+        if df is None or df.empty or "CAPWORK" not in df.columns:
+            return []
+        return df["CAPWORK"].astype(str).str.strip().tolist()
+    except Exception:
+        return []
+
+
+def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_table_name, costcenter, workcenter,
+                                           kolon_sum, kolon_sumb, kolon_list, selected_units=("hours",), cap_grp=None):
+    """2. accordion: Tek bir (CC, Workcenter) için kapasite süresi tablosu (STAT + hafta/ay)."""
+    if not costcenter or not workcenter or not table_name or not kolon_sum:
+        return None
+    try:
+        where_cc_wc = f"STAND = '{costcenter}' AND CAPWORK = '{workcenter}'"
+        if cap_grp and cap_grp != "Kapasite Grubu":
+            where_cc_wc = f"CAPGRUP = '{cap_grp}' AND STAND = '{costcenter}' AND CAPWORK = '{workcenter}'"
+            sub_extra = ",CAPGRUP"
+            where_extra = f" AND A.CAPGRUP = '{cap_grp}'"
+        else:
+            sub_extra = ""
+            where_extra = ""
+        ihtiyac_sql = (
+            f"SELECT CAPWORK,{kolon_sum} FROM {table_name} "
+            f"WHERE {where_cc_wc} GROUP BY CAPWORK ORDER BY CAPWORK"
+        )
+        cap_work_sql = (
+            f"SELECT {kolon_sumb} FROM (SELECT STAND,CAPWORK{sub_extra} FROM {table_name} "
+            f"WHERE {where_cc_wc} GROUP BY CAPWORK,STAND{sub_extra}) A "
+            f"LEFT JOIN {capacity_table_name} B ON A.CAPWORK = B.WORKCENTER "
+            f"WHERE A.STAND = '{costcenter}' AND A.CAPWORK = '{workcenter}'{where_extra} "
+            f"GROUP BY A.STAND,A.CAPWORK"
+        )
+        sum_df = ag_instance.run_query(ihtiyac_sql)
+        sum_df_cap_work = ag_instance.run_query(cap_work_sql)
+        if sum_df is None or sum_df.empty or sum_df_cap_work is None or sum_df_cap_work.empty:
+            return None
+
+        selected_units = selected_units or ["hours"]
+        if "hours" in selected_units:
+            _div_safe(sum_df, 1, 60)
+            sum_df = sum_df.round(1)
+        elif "shifts" in selected_units:
+            _div_safe(sum_df, 1, 510)
+            sum_df = sum_df.round(1)
+
+        sum_df["STAT"] = "Kapasite İhtiyacı"
+        weeks = [c for c in kolon_list if c in sum_df.columns]
+        if not weeks:
+            weeks = [c for c in sum_df.columns if c not in ("CAPWORK", "STAT")]
+        filtered_sum_df = sum_df[["STAT"] + weeks].copy()
+
+        if sum_df_cap_work.shape[1] > 0:
+            if "hours" in selected_units:
+                _div_safe(sum_df_cap_work, 0, 60)
+                sum_df_cap_work = sum_df_cap_work.round(1)
+            elif "shifts" in selected_units:
+                _div_safe(sum_df_cap_work, 0, 510)
+                sum_df_cap_work = sum_df_cap_work.round(1)
+            else:
+                _to_numeric_slice(sum_df_cap_work, 0)
+                sum_df_cap_work = sum_df_cap_work.round(0)
+
+        toplam_row = {"STAT": "Toplam Kapasite"}
+        toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
+        cap_df = pd.concat([filtered_sum_df, pd.DataFrame([toplam_row])], ignore_index=True)
+
+        fark_row = {"STAT": "Kapasite Farkı"}
+        for col in weeks:
+            try:
+                fark_row[col] = round(
+                    float(cap_df.loc[cap_df["STAT"] == "Toplam Kapasite", col].iloc[0])
+                    - float(cap_df.loc[cap_df["STAT"] == "Kapasite İhtiyacı", col].iloc[0]),
+                    1 if "hours" in selected_units or "shifts" in selected_units else 0,
+                )
+            except Exception:
+                fark_row[col] = 0
+        cap_df = pd.concat([cap_df, pd.DataFrame([fark_row])], ignore_index=True)
+
+        numeric_cols = [c for c in cap_df.columns if c != "STAT"]
+        cumsum = cap_df.loc[cap_df["STAT"] == "Kapasite Farkı", numeric_cols].cumsum(axis=1)
+        cum_row = {"STAT": "Kümülatif Toplam"}
+        cum_row.update(cumsum.iloc[0].to_dict())
+        cum_row = {k: (round(v, 1) if isinstance(v, (int, float)) else v) for k, v in cum_row.items()}
+        cap_df = pd.concat([cap_df, pd.DataFrame([cum_row])], ignore_index=True)
+
+        ui_row = cap_df[cap_df["STAT"] == "Kapasite İhtiyacı"].iloc[0]
+        tk_row = cap_df[cap_df["STAT"] == "Toplam Kapasite"].iloc[0]
+        doluluk_vals = []
+        for col in weeks:
+            try:
+                tk = float(tk_row[col])
+                ui = float(ui_row[col])
+                doluluk_vals.append(round((ui / tk) * 100, 1) if tk != 0 else 0)
+            except Exception:
+                doluluk_vals.append(0)
+        doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks)
+        doluluk_df["STAT"] = "Doluluk Oranı(%)"
+        cap_df = pd.concat([cap_df, doluluk_df], ignore_index=True)
+        return cap_df
+    except Exception as e:
+        print(f"kapasite_data build_capacity_table_for_cc_workcenter hatası: {e}")
+        return None
+
+
+def build_workcenter_yuk_table_for_cc(ag_instance, table_name, costcenter, kolon_sum_str, selected_units=("hours",), capacity_table_name=None):
+    """Yük tablosu: CAPWORK + hafta/ay kolonları + Verimlilik (VLFVARDIYASURE).
+    Sıra dashboard ile aynı: önce sayısal dönüşüm (round, saat/vardiya), sonra Verimlilik kolonu eklenir."""
+    if not costcenter or not table_name or not kolon_sum_str:
+        return None
+    try:
+        sql_yuk = (
+            f"SELECT CAPWORK, {kolon_sum_str} FROM [{table_name}] "
+            f"WHERE STAND = '{costcenter}' GROUP BY CAPWORK ORDER BY CAPWORK"
+        )
+        df = ag_instance.run_query(sql_yuk)
+        if df is None or df.empty:
+            return None
+
+        df = df.round(0)
+        if "hours" in (selected_units or []):
+            _div_safe(df, 1, 60)
+            df = df.round(1)
+        elif "shifts" in (selected_units or []):
+            _div_safe(df, 1, 510)
+            df = df.round(1)
+
+        
+        verim_df = get_verimlilik_df(ag_instance)
+        if verim_df is not None:
+            df = df.merge(verim_df, left_on="CAPWORK", right_on="WORKCENTER", how="left")
+            df = df.drop(columns=["WORKCENTER"], errors="ignore")
+            df["Verimlilik"] = pd.to_numeric(df["Verimlilik"], errors="coerce")
+        else:
+            df["Verimlilik"] = None
+
+        return df
+    except Exception as e:
+        print(f"kapasite_data build_workcenter_yuk_table_for_cc hatası: {e}")
+        return None
+
+
+def build_malzeme_table_for_cc(ag_instance, table_name, costcenter, kolon_sum_str, selected_units=("hours",), for_report=False):
+   
+    if not costcenter or not table_name or not kolon_sum_str:
+        return None
+    where = f"WHERE STAND = '{costcenter}'"
+    df = None
+    if for_report:
+        try:
+            sql = f"SELECT MATERIAL, DRAWNUM, MACHINE, BASEQUAN, MTUNIT, {kolon_sum_str} FROM {table_name} {where} GROUP BY MATERIAL, DRAWNUM, MACHINE, BASEQUAN, MTUNIT ORDER BY MATERIAL, DRAWNUM, MACHINE, BASEQUAN, MTUNIT"
+            df = ag_instance.run_query(sql)
+        except Exception:
+            df = None
+        if df is None or df.empty:
+            return None
+    else:
+        try:
+            sql = f"SELECT MATERIAL, DRAWNUM, {kolon_sum_str} FROM {table_name} {where} GROUP BY MATERIAL, DRAWNUM ORDER BY MATERIAL, DRAWNUM"
+            df = ag_instance.run_query(sql)
+        except Exception:
+            df = None
+        if df is None or df.empty:
+            for id_col in ["MATERIAL", "CAPWORK", "STAND"]:
+                try:
+                    sql = f"SELECT {id_col}, {kolon_sum_str} FROM {table_name} {where} GROUP BY {id_col} ORDER BY {id_col}"
+                    df = ag_instance.run_query(sql)
+                    if df is not None and not df.empty:
+                        break
+                except Exception:
+                    df = None
+        if df is None or df.empty:
+            return None
+    if "MACHINE" in df.columns and "BASEQUAN" in df.columns and "MTUNIT" in df.columns:
+        num_id_cols = 5
+    elif "MACHINE" in df.columns and "BASEQUAN" in df.columns:
+        num_id_cols = 4
+    elif "MATERIAL" in df.columns and "DRAWNUM" in df.columns:
+        num_id_cols = 2
+    else:
+        num_id_cols = 1
+    try:
+        df = df.round(0)
+    except Exception:
+        pass
+    if "hours" in (selected_units or []):
+        _div_safe(df, num_id_cols, 60)
+        df = df.round(1)
+    elif "shifts" in (selected_units or []):
+        _div_safe(df, num_id_cols, 510)
+        df = df.round(1)
+    return df
+
+
+def build_malzeme_table_for_cc_workcenter(ag_instance, table_name, costcenter, workcenter, kolon_sum_str, selected_units=("hours",), for_report=False):
+    """Malzeme tablosu: belirli bir (CC, Workcenter) için. build_malzeme_table_for_cc ile aynı mantık, WHERE'e CAPWORK eklenir."""
+    if not costcenter or not workcenter or not table_name or not kolon_sum_str:
+        return None
+    where = f"WHERE STAND = '{costcenter}' AND CAPWORK = '{workcenter}'"
+    df = None
+    if for_report:
+        try:
+            sql = f"SELECT MATERIAL, DRAWNUM, MACHINE, BASEQUAN, MTUNIT, {kolon_sum_str} FROM {table_name} {where} GROUP BY MATERIAL, DRAWNUM, MACHINE, BASEQUAN, MTUNIT ORDER BY MATERIAL, DRAWNUM, MACHINE, BASEQUAN, MTUNIT"
+            df = ag_instance.run_query(sql)
+        except Exception:
+            df = None
+        if df is None or df.empty:
+            return None
+    else:
+        try:
+            sql = f"SELECT MATERIAL, DRAWNUM, {kolon_sum_str} FROM {table_name} {where} GROUP BY MATERIAL, DRAWNUM ORDER BY MATERIAL, DRAWNUM"
+            df = ag_instance.run_query(sql)
+        except Exception:
+            df = None
+        if df is None or df.empty:
+            for id_col in ["MATERIAL", "CAPWORK", "STAND"]:
+                try:
+                    sql = f"SELECT {id_col}, {kolon_sum_str} FROM {table_name} {where} GROUP BY {id_col} ORDER BY {id_col}"
+                    df = ag_instance.run_query(sql)
+                    if df is not None and not df.empty:
+                        break
+                except Exception:
+                    df = None
+        if df is None or df.empty:
+            return None
+    if "MACHINE" in df.columns and "BASEQUAN" in df.columns and "MTUNIT" in df.columns:
+        num_id_cols = 5
+    elif "MACHINE" in df.columns and "BASEQUAN" in df.columns:
+        num_id_cols = 4
+    elif "MATERIAL" in df.columns and "DRAWNUM" in df.columns:
+        num_id_cols = 2
+    else:
+        num_id_cols = 1
+    try:
+        df = df.round(0)
+    except Exception:
+        pass
+    if "hours" in (selected_units or []):
+        _div_safe(df, num_id_cols, 60)
+        df = df.round(1)
+    elif "shifts" in (selected_units or []):
+        _div_safe(df, num_id_cols, 510)
+        df = df.round(1)
+    return df

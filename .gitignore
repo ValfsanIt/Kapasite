@@ -1,0 +1,19 @@
+# Sanal ortam
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE / ortam
+.idea/
+.vscode/
+*.swp
+.env
+.env.local
