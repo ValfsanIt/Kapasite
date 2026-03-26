@@ -10,7 +10,7 @@ from dash import dcc, Input, Output, State, ctx , no_update
 from dash_ag_grid import AgGrid  # type: ignore[reportMissingImports]
 from dash.dash_table.Format import Format, Scheme
 import os
-from run.agent import ag
+import sys
 import plotly.express as px
 from app import app, cache, TIMEOUT
 import kapasite_data
@@ -18,6 +18,11 @@ from decimal import Decimal
 from dash.exceptions import PreventUpdate
 import re
 import time
+
+_RUN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run")
+if _RUN_DIR not in sys.path:
+    sys.path.append(_RUN_DIR)
+from agent import ag  # type: ignore[reportMissingImports]
 
 
 def _export_styled_excel(df, filename, table_title=None):
@@ -356,6 +361,41 @@ def _coerce_numeric_records(records, columns):
     return records
 
 
+def _blank_zero_cells_in_records(records, columns):
+    """UI'da 0 gösterilmesini engellemek için seçili hücreleri boşaltır."""
+    if not records or not columns:
+        return records
+    for r in records:
+        for c in columns:
+            if c not in r:
+                continue
+            v = r.get(c)
+            if v is None:
+                continue
+            if isinstance(v, (int, float)):
+                if float(v) == 0.0:
+                    r[c] = None
+                continue
+            if isinstance(v, str):
+                s = v.strip()
+                if s == "":
+                    continue
+                try:
+                    s2 = s.replace(".", "").replace(",", ".")
+                    if float(s2) == 0.0:
+                        r[c] = None
+                except Exception:
+                    pass
+                continue
+            # numpy sayı tipleri vb. int/float dışı numeric değerleri de kapsa
+            try:
+                if float(v) == 0.0:
+                    r[c] = None
+            except Exception:
+                pass
+    return records
+
+
 def is_number(x):
     try:
         float(x)
@@ -380,6 +420,16 @@ def _clean_df_column_names(df):
         new_cols.append(new)
     df.columns = new_cols
     return df
+
+
+def _display_col_name(col_id, zero_first_state):
+    """Dashboard'da ZIP görünümüyle uyum için ilk tarih kolonu başlığını '0' göster."""
+    if zero_first_state["available"] and zero_first_state["first_done"] is False:
+        c = str(col_id)
+        if re.match(r"^\d{4}-\d{2}$", c):
+            zero_first_state["first_done"] = True
+            return "0"
+    return col_id if (col_id and str(col_id).strip()) else "\u00a0"
 
 
 def get_table_columns(table_name):
@@ -554,6 +604,15 @@ layout = dbc.Container([
     # ── PAGE HEADER ────────────────────────────────────────────────
     html.Div([
         html.Div(className="kap-header-glow"),
+        html.Div(
+            id='veri-tipi-loading-hint',
+            className='kap-header-veri-tipi-loading',
+            style={'display': 'none'},
+            children=[
+                html.Span(className='kap-veri-tipi-spinner kap-veri-tipi-spinner--header', **{'aria-hidden': 'true'}),
+                html.Span('Veriler Güncelleniyor', className='kap-veri-tipi-loading-text kap-veri-tipi-loading-text--header'),
+            ],
+        ),
         html.Div([
             html.Span("◈", className="kap-header-icon"),
             html.Div([
@@ -638,6 +697,12 @@ layout = dbc.Container([
                 ),
             ], md=4, className="mb-0 kap-col-zaman-birimi"),
         ], className="g-3 align-items-end"),
+        dcc.Interval(
+            id='veri-tipi-load-hide',
+            interval=2000,
+            n_intervals=0,
+            disabled=True,
+        ),
 
     ], className="kap-control-panel"),
 
@@ -720,7 +785,10 @@ layout = dbc.Container([
                             fixed_rows={'headers': True},
                             fixed_columns={'headers': True, 'data': 1},
                             row_selectable=False,
+                            cell_selectable=True,
                             selected_rows=[],
+                            selected_cells=[],
+                            include_headers_on_copy_paste=True,
                             active_cell=None,
                             style_cell_conditional=[
                                 {'if': {'column_id': 'STAND'},
@@ -731,6 +799,7 @@ layout = dbc.Container([
                                  'overflow': 'visible'},
                             ],
                         ),
+                        dcc.Store(id='cc_yuk_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
                 ], id="tab-panel-yuk", style={
                     'display': 'flex', 'flexDirection': 'column', 'width': '100%', 'height': '100%',
@@ -770,9 +839,13 @@ layout = dbc.Container([
                                  'textAlign': 'left', 'paddingLeft': '14px',
                                  'overflow': 'visible'},
                             ],
+                            cell_selectable=True,
                             selected_rows=[],
+                            selected_cells=[],
+                            include_headers_on_copy_paste=True,
                             active_cell=None,
                         ),
+                        dcc.Store(id='cc_kap_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
                 ], id="tab-panel-kap", style={
                     'display': 'none', 'flexDirection': 'column', 'width': '100%', 'height': '100%',
@@ -894,9 +967,13 @@ layout = dbc.Container([
                                  'textAlign': 'left', 'paddingLeft': '14px',
                                  'overflow': 'visible'},
                             ],
+                            cell_selectable=True,
                             selected_rows=[],
+                            selected_cells=[],
+                            include_headers_on_copy_paste=True,
                             active_cell=None,
                         ),
+                        dcc.Store(id='wc_yuk_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
                 ], id="wc-tab-panel-yuk", style={
                     'display': 'none', 'width': '100%', 'height': '100%',
@@ -937,9 +1014,13 @@ layout = dbc.Container([
                                  'textAlign': 'left', 'paddingLeft': '14px',
                                  'overflow': 'visible'},
                             ],
+                            cell_selectable=True,
                             selected_rows=[],
+                            selected_cells=[],
+                            include_headers_on_copy_paste=True,
                             active_cell=None,
                         ),
+                        dcc.Store(id='wc_kap_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
                 ], id="wc-tab-panel-kap", style={
                     'display': 'none', 'width': '100%', 'height': '100%',
@@ -985,9 +1066,13 @@ layout = dbc.Container([
                                  'minWidth': '150px', 'maxWidth': '220px',
                                  'textAlign': 'left', 'paddingLeft': '14px'},
                             ],
+                            cell_selectable=True,
                             selected_rows=[],
+                            selected_cells=[],
+                            include_headers_on_copy_paste=True,
                             active_cell=None,
                         ),
+                        dcc.Store(id='material_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
                 ], id="wc-tab-panel-malzeme", style={
                     'display': 'none', 'width': '100%', 'height': '100%',
@@ -1109,6 +1194,175 @@ def _selection_info_children(veri_tipi, costcenter_value):
 def update_selection_info_labels(veri_tipi, costcenter_value):
     children = _selection_info_children(veri_tipi, costcenter_value)
     return (children,) * 7
+
+
+_VERI_TIPI_HINT_VISIBLE = {'display': 'flex'}
+_VERI_TIPI_HINT_HIDDEN = {'display': 'none'}
+
+
+@app.callback(
+    Output('veri-tipi-loading-hint', 'style'),
+    Output('veri-tipi-load-hide', 'disabled'),
+    Output('veri-tipi-load-hide', 'n_intervals'),
+    Input('data-type-dropdown', 'value'),
+    prevent_initial_call=True,
+)
+def veri_tipi_show_loading_hint(_value):
+    return _VERI_TIPI_HINT_VISIBLE, False, 0
+
+
+@app.callback(
+    Output('veri-tipi-loading-hint', 'style', allow_duplicate=True),
+    Output('veri-tipi-load-hide', 'disabled', allow_duplicate=True),
+    Input('veri-tipi-load-hide', 'n_intervals'),
+    prevent_initial_call=True,
+)
+def veri_tipi_hide_loading_hint(n):
+    if n is None or n < 1:
+        raise PreventUpdate
+    return _VERI_TIPI_HINT_HIDDEN, True
+
+
+@app.callback(
+    Output('costcenter_table', 'selected_cells'),
+    Output('costcenter_table', 'active_cell'),
+    Output('cc_yuk_multi_sel_flag', 'data'),
+    Output('capasity_table_costcenter', 'selected_cells'),
+    Output('capasity_table_costcenter', 'active_cell'),
+    Output('cc_kap_multi_sel_flag', 'data'),
+    Output('workcenter_table', 'selected_cells'),
+    Output('workcenter_table', 'active_cell'),
+    Output('wc_yuk_multi_sel_flag', 'data'),
+    Output('capasity_table_workcenter', 'selected_cells'),
+    Output('capasity_table_workcenter', 'active_cell'),
+    Output('wc_kap_multi_sel_flag', 'data'),
+    Output('material_table', 'selected_cells'),
+    Output('material_table', 'active_cell'),
+    Output('material_multi_sel_flag', 'data'),
+    Input('costcenter_table', 'selected_cells'),
+    Input('costcenter_table', 'active_cell'),
+    Input('capasity_table_costcenter', 'selected_cells'),
+    Input('capasity_table_costcenter', 'active_cell'),
+    Input('workcenter_table', 'selected_cells'),
+    Input('workcenter_table', 'active_cell'),
+    Input('capasity_table_workcenter', 'selected_cells'),
+    Input('capasity_table_workcenter', 'active_cell'),
+    Input('material_table', 'selected_cells'),
+    Input('material_table', 'active_cell'),
+    State('cc_yuk_multi_sel_flag', 'data'),
+    State('cc_kap_multi_sel_flag', 'data'),
+    State('wc_yuk_multi_sel_flag', 'data'),
+    State('wc_kap_multi_sel_flag', 'data'),
+    State('material_multi_sel_flag', 'data'),
+    prevent_initial_call=True,
+)
+def _clear_multi_cell_highlight_on_next_click(
+    cc_selected_cells,
+    cc_active_cell,
+    cc_kap_selected_cells,
+    cc_kap_active_cell,
+    wc_selected_cells,
+    wc_active_cell,
+    wc_kap_selected_cells,
+    wc_kap_active_cell,
+    material_selected_cells,
+    material_active_cell,
+    cc_yuk_multi_flag,
+    cc_kap_multi_flag,
+    wc_yuk_multi_flag,
+    wc_kap_multi_flag,
+    material_multi_flag,
+):
+    """
+    Shift ile çoklu hücre seçildiğinde highlight göster.
+    Kullanıcı bir sonraki tıklamada o tablonun active_cell'ını değiştirirse,
+    çoklu highlight'ı tamamen kapat (selected_cells=[], active_cell=None).
+    """
+    # Varsayılan: hiçbir tabloyu değiştirme.
+    out_cc_sel = no_update
+    out_cc_active = no_update
+    out_cc_flag = no_update
+
+    out_cc_kap_sel = no_update
+    out_cc_kap_active = no_update
+    out_cc_kap_flag = no_update
+
+    out_wc_sel = no_update
+    out_wc_active = no_update
+    out_wc_flag = no_update
+
+    out_wc_kap_sel = no_update
+    out_wc_kap_active = no_update
+    out_wc_kap_flag = no_update
+
+    out_mat_sel = no_update
+    out_mat_active = no_update
+    out_mat_flag = no_update
+
+    def _sel_len(sel):
+        return len(sel) if sel else 0
+
+    prop_id = ctx.triggered[0]['prop_id'] if ctx.triggered else ''
+    if '.' in prop_id:
+        comp_id, prop = prop_id.rsplit('.', 1)
+    else:
+        comp_id, prop = prop_id, None
+
+    # 1) Shift/çoklu seçim tamamlanırken (selected_cells değiştiğinde) flag set et.
+    if comp_id == 'costcenter_table' and prop == 'selected_cells':
+        out_cc_flag = (_sel_len(cc_selected_cells) > 1)
+    if comp_id == 'capasity_table_costcenter' and prop == 'selected_cells':
+        out_cc_kap_flag = (_sel_len(cc_kap_selected_cells) > 1)
+    if comp_id == 'workcenter_table' and prop == 'selected_cells':
+        out_wc_flag = (_sel_len(wc_selected_cells) > 1)
+    if comp_id == 'capasity_table_workcenter' and prop == 'selected_cells':
+        out_wc_kap_flag = (_sel_len(wc_kap_selected_cells) > 1)
+    if comp_id == 'material_table' and prop == 'selected_cells':
+        out_mat_flag = (_sel_len(material_selected_cells) > 1)
+
+    # 2) Sonra kullanıcı active_cell'a tıklayınca (aktif hücre değişince) çoklu highlight'ı kaldır.
+    if comp_id == 'costcenter_table' and prop == 'active_cell' and cc_yuk_multi_flag:
+        out_cc_sel = []
+        out_cc_active = None
+        out_cc_flag = False
+
+    if comp_id == 'capasity_table_costcenter' and prop == 'active_cell' and cc_kap_multi_flag:
+        out_cc_kap_sel = []
+        out_cc_kap_active = None
+        out_cc_kap_flag = False
+
+    if comp_id == 'workcenter_table' and prop == 'active_cell' and wc_yuk_multi_flag:
+        out_wc_sel = []
+        out_wc_active = None
+        out_wc_flag = False
+
+    if comp_id == 'capasity_table_workcenter' and prop == 'active_cell' and wc_kap_multi_flag:
+        out_wc_kap_sel = []
+        out_wc_kap_active = None
+        out_wc_kap_flag = False
+
+    if comp_id == 'material_table' and prop == 'active_cell' and material_multi_flag:
+        out_mat_sel = []
+        out_mat_active = None
+        out_mat_flag = False
+
+    return (
+        out_cc_sel,
+        out_cc_active,
+        out_cc_flag,
+        out_cc_kap_sel,
+        out_cc_kap_active,
+        out_cc_kap_flag,
+        out_wc_sel,
+        out_wc_active,
+        out_wc_flag,
+        out_wc_kap_sel,
+        out_wc_kap_active,
+        out_wc_kap_flag,
+        out_mat_sel,
+        out_mat_active,
+        out_mat_flag,
+    )
 
 
 @app.callback(
@@ -1363,15 +1617,18 @@ def update_graph(table_name, kolon_sum_filtered, kolon_sum_raw, current_costcent
     # Keep numeric values as numbers so numeric comparisons work
     data = df_pivot.to_dict('records')  # rowData için uygun format
     # Coerce possible formatted numeric strings back to numbers so style comparisons work
-    _coerce_numeric_records(data, kolon_list)
+    costcenter_numeric_cols = [c for c in df_pivot.columns if c != "STAND"]
+    _coerce_numeric_records(data, costcenter_numeric_cols)
+    _blank_zero_cells_in_records(data, costcenter_numeric_cols)
 
    
 
     
     # İlk kolon başlığı boş kalmasın (köşe hücresi = sabit kolonun başlangıcı; sağa kaydırmada üstte kalması için)
     column_definitions = []
+    zero_first_state = {"available": table_name in ("VLFCAPFINALPIVOT", "VLFCAPFINALSIPARIS"), "first_done": False}
     for col in df_pivot.columns:
-        name = col if (col and str(col).strip()) else '\u00a0'
+        name = _display_col_name(col, zero_first_state)
         column_definitions.append({'name': name, 'id': col, 'hideable': False})
 
     # normalize kolon_list to a list to avoid TypeError if None
@@ -1642,8 +1899,11 @@ def update_workcenter(selected_workcenter, selected_capgrup,
 
         # Keep numeric values as numbers so numeric comparisons work
         wc_data = wc_df.to_dict('records')
-        _coerce_numeric_records(wc_data, [c for c in wc_df.columns if c != "CAPWORK"])
-        wc_cols = [{'name': (c if (c and str(c).strip()) else '\u00a0'), 'id': c, 'hideable': False} for c in wc_df.columns]
+        wc_numeric_cols = [c for c in wc_df.columns if c != "CAPWORK"]
+        _coerce_numeric_records(wc_data, wc_numeric_cols)
+        _blank_zero_cells_in_records(wc_data, wc_numeric_cols)
+        zero_first_state = {"available": table_name in ("VLFCAPFINALPIVOT", "VLFCAPFINALSIPARIS"), "first_done": False}
+        wc_cols = [{'name': _display_col_name(c, zero_first_state), 'id': c, 'hideable': False} for c in wc_df.columns]
         wc_style = [
             {'if': {'row_index': 'odd'},  'backgroundColor': '#eef4ff'},
             {'if': {'row_index': 'even'}, 'backgroundColor': '#ffffff'},
@@ -1670,8 +1930,11 @@ def update_workcenter(selected_workcenter, selected_capgrup,
             filtered_cols = ['MATERIAL', 'DRAWNUM'] + [c for c in kolon_list if c in mat_df.columns]
             mat_df = mat_df[[c for c in filtered_cols if c in mat_df.columns]]
             mat_data = mat_df.to_dict('records')
-            _coerce_numeric_records(mat_data, [c for c in kolon_list if c in mat_df.columns])
-            mat_cols = [{'name': (c if (c and str(c).strip()) else '\u00a0'), 'id': c, 'hideable': False} for c in mat_df.columns]
+            mat_numeric_cols = [c for c in kolon_list if c in mat_df.columns]
+            _coerce_numeric_records(mat_data, mat_numeric_cols)
+            _blank_zero_cells_in_records(mat_data, mat_numeric_cols)
+            zero_first_state = {"available": table_name in ("VLFCAPFINALPIVOT", "VLFCAPFINALSIPARIS"), "first_done": False}
+            mat_cols = [{'name': _display_col_name(c, zero_first_state), 'id': c, 'hideable': False} for c in mat_df.columns]
             mat_style = [
                 {'if': {'row_index': 'odd'},  'backgroundColor': '#eef4ff'},
                 {'if': {'row_index': 'even'}, 'backgroundColor': '#ffffff'},
@@ -1793,7 +2056,9 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                 # Keep capacity numbers numeric so numeric style rules (>=100, <0) work
                 cap_data = cap_df_wc.to_dict('records')
                 _coerce_numeric_records(cap_data, weeks_cap)
-                cap_cols_def = [{'name': 'STAT', 'id': 'STAT', 'hideable': False}] + [{'name': (c if (c and str(c).strip()) else '\u00a0'), 'id': c, 'hideable': False} for c in weeks_cap]
+                _blank_zero_cells_in_records(cap_data, weeks_cap)
+                zero_first_state = {"available": table_name in ("VLFCAPFINALPIVOT", "VLFCAPFINALSIPARIS"), "first_done": False}
+                cap_cols_def = [{'name': 'STAT', 'id': 'STAT', 'hideable': False}] + [{'name': _display_col_name(c, zero_first_state), 'id': c, 'hideable': False} for c in weeks_cap]
                 cap_wc_style = [
                     {'if': {'row_index': 'odd'},  'backgroundColor': '#eef4ff'},
                     {'if': {'row_index': 'even'}, 'backgroundColor': '#ffffff'},
@@ -2274,8 +2539,10 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
         # Convert to records and coerce formatted strings to numeric types
         cap_records = cap_df_prepared.to_dict('records')
         _coerce_numeric_records(cap_records, weeks)
+        _blank_zero_cells_in_records(cap_records, weeks)
 
-        cols = [{'name': 'STAT', 'id': 'STAT', 'hideable': False}] + [{'name': c, 'id': c, 'hideable': False} for c in weeks]
+        zero_first_state = {"available": table_name in ("VLFCAPFINALPIVOT", "VLFCAPFINALSIPARIS"), "first_done": False}
+        cols = [{'name': 'STAT', 'id': 'STAT', 'hideable': False}] + [{'name': _display_col_name(c, zero_first_state), 'id': c, 'hideable': False} for c in weeks]
 
         sdc = [
             {'if': {'row_index': 'odd'},  'backgroundColor': '#eef4ff'},

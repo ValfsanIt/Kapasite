@@ -1,18 +1,32 @@
 # -*- coding: utf-8 -*-
 
 from datetime import datetime, timedelta
+from collections import defaultdict
+from contextlib import nullcontext
 import io
 import zipfile
 import base64
 import re
+import os
+import sys
+import time
+import smtplib
 import pandas as pd
+from email.message import EmailMessage
+import config
+
 from dash import html, dcc, Input, Output, no_update
 import dash_bootstrap_components as dbc
 from dash.exceptions import PreventUpdate
 
 from app import app
-from run.agent import ag
 import kapasite_data
+
+_RUN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run")
+if _RUN_DIR not in sys.path:
+    sys.path.append(_RUN_DIR)
+from agent import ag  # type: ignore[reportMissingImports]
+import agent as run_agent  # type: ignore[reportMissingImports]
 
 # Veri tipleri: (etiket, tablo, kapasite_tablo, haftalık/aylık)
 DATA_TYPES = [
@@ -21,9 +35,263 @@ DATA_TYPES = [
     ("Öngörü Miktarı", "VLFCAPFINALOY", "VLFVARDIYASUREAY", "monthly"),
 ]
 
-# Raporlamada işlenecek cost center'lar. Boş liste = tablodaki tüm cost center'lar.
-# Eski kısıtlama: ["CNC FREZE", "CNC TORNA", "MONTAJ"] — artık tümü için rapor üretiliyor.
+
+RAPORLAMA_SINGLE_COSTCENTER = None
+
+
 RAPORLAMA_COSTCENTERS = []
+
+
+RAPORLAMA_NOTIFY_EMAIL = "dayyildiz@valfsan.com.tr"
+
+
+RAPORLAMA_PROFILE_TIMING = True
+
+
+def _normalize_recipients(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [x.strip() for x in value.split(",") if x.strip()]
+    try:
+        return [str(x).strip() for x in value if str(x).strip()]
+    except TypeError:
+        text = str(value).strip()
+        return [text] if text else []
+
+
+def _get_notify_recipients():
+    to_list = _normalize_recipients(getattr(config, "RAPORLAMA_NOTIFY_TO", None))
+    cc_list = _normalize_recipients(getattr(config, "RAPORLAMA_NOTIFY_CC", None))
+    bcc_list = _normalize_recipients(getattr(config, "RAPORLAMA_NOTIFY_BCC", None))
+    if not to_list:
+        to_list = _normalize_recipients(RAPORLAMA_NOTIFY_EMAIL)
+    return to_list, cc_list, bcc_list
+
+
+def _rapor_profile_enabled():
+    v = os.environ.get("KAP_RAPOR_PROFILE", "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    if v in ("1", "true", "yes", "on"):
+        return True
+    return RAPORLAMA_PROFILE_TIMING
+
+
+def _sql_tables_guess(sql):
+    """Sorgudaki FROM/JOIN [Tablo] adları — süre dağılımı için kabaca gruplama."""
+    if not sql:
+        return []
+    return re.findall(r"(?:FROM|JOIN)\s+\[([^\]]+)\]", str(sql), flags=re.I)
+
+
+class _RunQueryProfiler:
+    """run.agent.run_query + Agent.run_query için geçici sarmalayıcı (SQL süresi toplar)."""
+
+    def __init__(self, state):
+        self.state = state
+        self._mod = None
+        self._orig_fn = None
+        self._orig_agent_rq_fn = None
+
+    def __enter__(self):
+        import agent as ra  # type: ignore[reportMissingImports]
+
+        # Önceki sürümden kalan bozuk durumda (plain function) otomatik toparla.
+        if not isinstance(ra.Agent.__dict__.get("run_query"), staticmethod):
+            ra.Agent.run_query = staticmethod(ra.run_query)
+
+        self._mod = ra
+        self._orig_fn = ra.run_query
+        # Class __dict__ içindeki staticmethod sarmalını bozmadan sakla.
+        orig_agent_attr = ra.Agent.__dict__.get("run_query")
+        if isinstance(orig_agent_attr, staticmethod):
+            self._orig_agent_rq_fn = orig_agent_attr.__func__
+        else:
+            self._orig_agent_rq_fn = ra.Agent.run_query
+        st = self.state
+
+        def _wrapped(sql):
+            t0 = time.perf_counter()
+            try:
+                return self._orig_fn(sql)
+            finally:
+                dt = time.perf_counter() - t0
+                st["sql_sec"] += dt
+                st["sql_calls"] += 1
+                tables = _sql_tables_guess(sql)
+                key = "+".join(sorted(set(tables))) if tables else "(sorgu)"
+                st["by_table"][key] += dt
+                preview = (sql or "").replace("\n", " ").strip()
+                if len(preview) > 220:
+                    preview = preview[:217] + "..."
+                st["slow_queries"].append((dt, preview))
+
+        ra.run_query = _wrapped
+        ra.Agent.run_query = staticmethod(_wrapped)
+        return self
+
+    def __exit__(self, *args):
+        if self._mod is not None:
+            self._mod.run_query = self._orig_fn
+            # Geri yüklemede staticmethod olarak sar, yoksa instance call'da 2 argüman hatası verir.
+            self._mod.Agent.run_query = staticmethod(self._orig_agent_rq_fn)
+        return False
+
+
+def _print_rapor_timing_report(zip_wall_sec, prof, per_excel_rows):
+    """Konsola özet rapor."""
+    lines = [
+        "",
+        "=" * 72,
+        "[Raporlama] SÜRE ÖZETİ (ZIP)",
+        "=" * 72,
+        f"  ZIP toplam (duvar saati):     {zip_wall_sec:,.2f} s",
+        f"  SQL toplam (run_query):       {prof['sql_sec']:,.2f} s  ({prof['sql_calls']} çağrı)",
+        f"  ZIP − SQL (Excel+pandas+zip): {max(0.0, zip_wall_sec - prof['sql_sec']):,.2f} s",
+        "",
+        "  En çok süren SQL tablo grupları (FROM/JOIN [..] özeti, üst 12):",
+    ]
+    by_t = sorted(prof["by_table"].items(), key=lambda x: -x[1])[:12]
+    if not by_t:
+        lines.append("    (veri yok)")
+    for name, sec in by_t:
+        lines.append(f"    {sec:8.2f} s  {name}")
+    lines.append("")
+    lines.append("  En yavaş tek sorgular (üst 15):")
+    slow = sorted(prof["slow_queries"], key=lambda x: -x[0])[:15]
+    if not slow:
+        lines.append("    (veri yok)")
+    for sec, prev in slow:
+        lines.append(f"    {sec:8.2f} s  {prev}")
+    lines.append("")
+    lines.append("  Her Excel dosyası:")
+    for row in per_excel_rows:
+        lines.append(
+            f"    • {row['label']}: duvar {row['wall_sec']:.2f} s | "
+            f"SQL {row['sql_sec']:.2f} s | Excel gövde ~{row['non_sql_sec']:.2f} s | "
+            f"save {row.get('save_sec', 0):.2f} s | CC={row['cc_count']}"
+        )
+        seg = row.get("segments") or {}
+        if seg:
+            lines.append(
+                "        aşamalar: "
+                + " | ".join(f"{k}={v:.2f}s" for k, v in sorted(seg.items(), key=lambda x: -x[1])[:8])
+            )
+        cc_top = row.get("cc_detail_top")
+        if cc_top:
+            lines.append("        en yavaş CC detay sayfası (duvar):")
+            for cc, sec in cc_top:
+                lines.append(f"          {sec:7.2f} s  {cc}")
+    lines.append("=" * 72)
+    print("\n".join(lines))
+
+
+def _send_report_notification_email(status, detail, created_reports=None, attachment_bytes=None, attachment_name="kapasite_raporlar.zip"):
+    """Raporlama işlem sonucu için e-posta bildirimi gönderir.
+
+    Varsayılan: Windows Outlook oturumundan (şifresiz) göndermeyi dener.
+    Outlook yoksa/çalışmazsa SMTP'ye düşer.
+    status: "BASARILI" | "BASARISIZ"
+    """
+    created_reports = created_reports or []
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    subject = f"Kapasite Raporlama - {status}"
+    body = (
+        "Kapasite raporlama islemi tamamlandi.\n\n"
+        f"Durum: {status}\n"
+        f"Tarih: {now_str}\n"
+        f"Detay: {detail}\n"
+        f"Raporlar: {', '.join(created_reports) if created_reports else '-'}\n"
+    )
+
+    to_list, cc_list, bcc_list = _get_notify_recipients()
+    recipient_text = ", ".join(to_list + cc_list + bcc_list) if (to_list or cc_list or bcc_list) else "-"
+
+    # 1) SMTP (config.py içindeki MAIL_MODE ayarına göre)
+    host = str(getattr(config, "mail_server", "") or "").strip()
+    port = int(getattr(config, "mail_port", 25) or 25)
+    use_tls = bool(getattr(config, "SMTP_USE_STARTTLS", False))
+    require_auth = bool(getattr(config, "SMTP_REQUIRE_AUTH", False))
+    user = str(getattr(config, "SMTP_USERNAME", "") or "").strip()
+    password = str(getattr(config, "SMTP_PASSWORD", "") or "")
+    sender = user or "no-reply@localhost"
+
+    if host:
+
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = sender
+        if to_list:
+            msg["To"] = ", ".join(to_list)
+        if cc_list:
+            msg["Cc"] = ", ".join(cc_list)
+        if bcc_list:
+            msg["Bcc"] = ", ".join(bcc_list)
+        msg.set_content(body)
+        if attachment_bytes:
+            msg.add_attachment(
+                attachment_bytes,
+                maintype="application",
+                subtype="zip",
+                filename=attachment_name,
+            )
+        try:
+            with smtplib.SMTP(host, port, timeout=12) as server:
+                if use_tls:
+                    server.starttls()
+                if require_auth and user:
+                    server.login(user, password)
+                server.send_message(msg)
+            return True, f"E-posta bildirimi gonderildi ({recipient_text}) [SMTP]."
+        except Exception as smtp_err:
+            smtp_msg = str(smtp_err)
+            if "5.7.139" in smtp_msg or "SmtpClientAuthentication is disabled" in smtp_msg:
+                return (
+                    False,
+                    "SMTP reddedildi: Microsoft 365 tarafinda SMTP AUTH kapali (5.7.139). "
+                    "IT yoneticisi tenant veya posta kutusu icin SMTP AUTH acmadan sifresiz gonderim mumkun degil.",
+                )
+    else:
+        smtp_msg = "SMTP ayari bulunamadi (config.mail_server yok)."
+
+    # 2) Outlook fallback (opsiyonel)
+    try:
+        import win32com.client  # type: ignore
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+        except Exception:
+            from win32com.client import gencache  # type: ignore
+            outlook = gencache.EnsureDispatch("Outlook.Application")
+        mail = outlook.CreateItem(0)
+        if to_list:
+            mail.To = ";".join(to_list)
+        if cc_list:
+            mail.CC = ";".join(cc_list)
+        mail.Subject = subject
+        mail.Body = body
+        if attachment_bytes:
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                tmp.write(attachment_bytes)
+                tmp_path = tmp.name
+            try:
+                mail.Attachments.Add(tmp_path)
+                mail.Send()
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+        else:
+            mail.Send()
+        return True, f"E-posta bildirimi gonderildi ({recipient_text}) [Outlook]."
+    except Exception as outlook_err:
+        return (
+            False,
+            "E-posta gonderilemedi. "
+            f"SMTP: {smtp_msg} | Outlook: {outlook_err}",
+        )
 
 
 
@@ -149,7 +417,7 @@ def _is_date_col(col_name):
 
 
 def _auto_col_widths(ws, first_col_width=30, date_col_width=10, other_col_width=14, max_w=40):
-    """İlk kolon sabit geniş, tarih kolonları dar, diğerleri içeriğe göre."""
+    
     from openpyxl.utils import get_column_letter
     for i, col_cells in enumerate(ws.columns, start=1):
         col_letter = get_column_letter(i)
@@ -166,7 +434,7 @@ def _auto_col_widths(ws, first_col_width=30, date_col_width=10, other_col_width=
 
 
 def _reorder_malzeme_columns_for_report(df, week_cols=None):
-    """Malzeme tablosunda MATERIAL kolonunu MACHINE kolonundan hemen önce (sağa) alır; MACHINE, BASEQUAN, MTUNIT sona kalır."""
+    
     if df is None or df.empty:
         return df
     end_cols = [c for c in ["MACHINE", "BASEQUAN", "MTUNIT"] if c in df.columns]
@@ -179,18 +447,17 @@ def _reorder_malzeme_columns_for_report(df, week_cols=None):
 
 
 def _add_cap_alignment_column(cap_df):
-    """Eski hiza için boş kolon ekleme kaldırıldı: Malzeme tablosunda MATERIAL sağa (MACHINE önüne) alınınca hiza aynı kalıyor."""
+    
     return cap_df
 
 
 def _apply_export_columns(df, hidden_columns=None, table_columns=None, table_name=None):
-    """Excel/raporlama: Kolonları Göster/Gizle butonundaki gizli kolonları çıkar; tablo başlıklarını (örn. 0) uygula.
-    hidden_columns yoksa (Raporlama sayfasından indirme) varsayılan olarak 'A' ile biten kolonlar (2026-01A vb.) çıkarılır."""
+    
     if df is None or df.empty:
         return df
     df = df.copy()
     hidden_set = set(hidden_columns) if hidden_columns is not None else set()
-    # Sadece Raporlama sayfasından indirildiğinde (hidden_columns None) varsayılan: A sütunlarını gizle (2026-01A, 2026-02A ...)
+    
     if hidden_columns is None and not hidden_set:
         hidden_set = {c for c in df.columns if isinstance(c, str) and len(c) >= 6 and c.endswith("A")}
     if hidden_set:
@@ -208,8 +475,7 @@ def _apply_export_columns(df, hidden_columns=None, table_columns=None, table_nam
 
 
 def _format_df_turkish_thousands(df):
-    """EK 3/4: Sayısal sütunları binlik nokta ile formatlar (13.600); virgül/ondalık yok.
-    Verimlilik kolonu atlanır (yüzde değeri olduğu için 80 vb. aynen yazılır)."""
+    
     if df is None or df.empty:
         return df
     df = df.copy()
@@ -228,7 +494,7 @@ def _format_df_turkish_thousands(df):
 
 
 def _parse_cell_to_float(val):
-    """Hücre değerini sayıya çevirir ('13.600', '-2.100' vb.)."""
+    
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
     if isinstance(val, (int, float)):
@@ -240,8 +506,16 @@ def _parse_cell_to_float(val):
         return None
 
 
+def _display_blank_if_zero(val):
+    """Rapor hücresinde 0 yerine boş değer göster."""
+    num = _parse_cell_to_float(val)
+    if num is not None and num == 0:
+        return None
+    return val
+
+
 def _write_sorunlu_sheet_title(ws, row, s, num_cols=9):
-    """Sorunlu Kapasite sayfasının en üstündeki ana başlık satırı."""
+    
     from openpyxl.styles import Alignment
     cell = ws.cell(row=row, column=1, value="Sorunlu Kapasite — Detay için başlığa tıklayın")
     cell.font = s["sorunlu_sheet_title_font"]
@@ -255,7 +529,7 @@ def _write_sorunlu_sheet_title(ws, row, s, num_cols=9):
 
 
 def _write_sorunlu_section_title(ws, row, title, s, section_index=0, num_cols=1, start_col=1):
-    """Sorunlu Kapasite sheet'inde bölüm başlığı (Hepsi, WC adı); section_index ile farklı renk."""
+    
     from openpyxl.styles import Alignment
     cell = ws.cell(row=row, column=start_col, value=title)
     cell.font = s["sorunlu_section_font"]
@@ -270,7 +544,7 @@ def _write_sorunlu_section_title(ws, row, title, s, section_index=0, num_cols=1,
 
 
 def _write_sorunlu_cc_big_title(ws, row, costcenter_name, s, cc_index=0, num_cols=1):
-    """Sorunlu Kapasite sheet'inde cost center büyük başlık; cc_index ile her CC farklı renk."""
+    
     from openpyxl.styles import Alignment
     cell = ws.cell(row=row, column=1, value=costcenter_name)
     cell.font = s["sorunlu_cc_big_font"]
@@ -289,12 +563,12 @@ SORUNLU_DISPLAY_COLS = ["Costcenter", "Satır Tipi", "Hafta/Ay", "Değer"]
 
 
 def _write_sorunlu_table_to_sheet(ws, start_row, df, s, start_col=1):
-    """Sorunlu tablosunu Costcenter pastel, Satır Tipi renkli, Değer kırmızı ile yazar. start_col'dan itibaren (varsayılan 1)."""
+    
     from openpyxl.styles import Alignment
     if df is None or df.empty:
         return start_row + 1
     cols = SORUNLU_DISPLAY_COLS
-    # Tablo başlık satırı (Sorunlu'ya özel koyu gri, beyaz yazı)
+    
     for c_idx, col_name in enumerate(cols, start=1):
         cell = ws.cell(row=start_row, column=start_col + c_idx - 1, value=col_name)
         cell.font = s.get("sorunlu_hdr_font", s["hdr_font"])
@@ -316,6 +590,8 @@ def _write_sorunlu_table_to_sheet(ws, start_row, df, s, start_col=1):
             tip_fill = s["zebra_fill"]
         for c_idx, col_name in enumerate(cols, start=1):
             val = r.get(col_name)
+            if c_idx >= 3:
+                val = _display_blank_if_zero(val)
             cell = ws.cell(row=row, column=start_col + c_idx - 1, value=val)
             cell.alignment = Alignment(horizontal="right" if c_idx >= 3 else "left", vertical="center")
             cell.border = s["data_border"]
@@ -344,8 +620,7 @@ def _write_sorunlu_empty_cell(ws, row, col, s):
 
 
 def _extract_sorunlu_from_cap_df(cap_df, costcenter, workcenter="Tümü"):
-    """Kapasite tablosundan sadece Kümülatif Toplam satırındaki kırmızı (negatif) hücreleri çıkarır.
-    Başlığı '0' olan ilk kolon dahil edilmez. Dönen liste: [{"Costcenter", "Workcenter", "Satır Tipi", "Hafta/Ay", "Değer"}, ...]"""
+    
     if cap_df is None or cap_df.empty or "STAT" not in cap_df.columns:
         return []
     
@@ -372,11 +647,10 @@ def _extract_sorunlu_from_cap_df(cap_df, costcenter, workcenter="Tümü"):
 
 
 def _extract_kumulatif_row_from_cap_df(cap_df, costcenter, workcenter="Tümü"):
-    """Kapasite tablosundan Kümülatif Toplam satırının tamamını tek kayıt olarak döndürür.
-    Dönen dict: Costcenter, Workcenter, STAT, ve tüm hafta/ay kolonları (0 dahil)."""
+    
     if cap_df is None or cap_df.empty or "STAT" not in cap_df.columns:
         return None
-    # 0 kolonu dahil tüm sayısal kolonlar (2. tabloda 0 da gösterilecek)
+    
     week_cols = [c for c in cap_df.columns if c != "STAT"]
     for _, row in cap_df.iterrows():
         stat_str = str(row.get("STAT") or "").strip()
@@ -387,7 +661,7 @@ def _extract_kumulatif_row_from_cap_df(cap_df, costcenter, workcenter="Tümü"):
             val = row.get(col)
             num = _parse_cell_to_float(val)
             if num is not None:
-                rec[col] = int(round(num, 0))
+                rec[col] = round(num, 1)
             else:
                 rec[col] = val
         return rec
@@ -395,7 +669,7 @@ def _extract_kumulatif_row_from_cap_df(cap_df, costcenter, workcenter="Tümü"):
 
 
 def _write_kumulatif_table_to_sheet(ws, start_row, df, s):
-    """Kümülatif Toplam satırlarını yazar (sadece Workcenter + hafta kolonları). Negatif hücreler kırmızı. Costcenter/STAT yok."""
+    
     from openpyxl.styles import Alignment, PatternFill
     _white_fill = PatternFill("solid", fgColor="FFFFFF")
     if df is None or df.empty:
@@ -423,7 +697,7 @@ def _write_kumulatif_table_to_sheet(ws, start_row, df, s):
                 cell.alignment = Alignment(horizontal="right", vertical="center")
                 num_val = _parse_cell_to_float(val)
                 if num_val is not None:
-                    cell.value = int(round(num_val, 0))
+                    cell.value = None if num_val == 0 else round(num_val, 1)
                 if num_val is not None and num_val < 0:
                     cell.fill = s["sorunlu_deger_fill"]
                     cell.font = s["sorunlu_deger_font"]
@@ -461,7 +735,8 @@ def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=Fal
             return row + 2
         return start_row + 1
 
-    df = _format_df_turkish_thousands(df)
+    
+    df = df.copy()
     is_capacity_table = len(df.columns) > 0 and df.columns[0] == "STAT"
     num_cols = len(df.columns)
     row = start_row
@@ -490,7 +765,7 @@ def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=Fal
             cell.fill      = s["hdr_fill"]
             cell.alignment = s["hdr_align"]
             cell.border    = s["hdr_border"]
-    ws.row_dimensions[row].height = 32  # wrap_text için yüksek tut
+    ws.row_dimensions[row].height = 32  
     row += 1
 
    
@@ -501,12 +776,16 @@ def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=Fal
 
         for c_idx, val in enumerate(r, start=1):
             num_val = None
-            # Kapasite tablosunda sayıları dashboard ile uyumlu tam sayı (veya Doluluk için 1 ondalık) yaz
+            
             write_val = val
             if is_capacity_table and c_idx > 1:
                 num_val = _parse_cell_to_float(val)
                 if num_val is not None:
-                    write_val = int(round(num_val, 0)) if not is_doluluk_row else round(num_val, 1)
+                    write_val = round(num_val, 1)
+                    if num_val == 0:
+                        write_val = None
+            elif c_idx > 1:
+                write_val = _display_blank_if_zero(val)
             cell = ws.cell(row=row, column=c_idx, value=write_val)
 
             # Temel stil
@@ -530,7 +809,7 @@ def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=Fal
                 cell.alignment = s["data_align"]
                 cell.border    = s["data_border"]
 
-            # ── Kapasite tablosunda negatif veya Doluluk>100 → kırmızı (num_val yukarıda parse edildi)
+            
             if is_capacity_table and c_idx > 1 and num_val is not None and (
                     num_val < 0 or (is_doluluk_row and num_val > 100)):
                 cell.fill = s["red_fill"]
@@ -544,8 +823,8 @@ def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=Fal
 
 
 def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dict, selected_units,
-                       hidden_columns=None, table_columns=None):
-    """columns_dict: format1, format2, format3. hidden_columns/table_columns: Kolonları Göster/Gizle ile uyumlu."""
+                       hidden_columns=None, table_columns=None, excel_profile=None):
+    
     if not costcenters or ag is None:
         return None
     try:
@@ -560,6 +839,69 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
     kolon_sum  = columns_dict["format2"]
     kolon_sumb = columns_dict["format1"]
     week_cols  = kapasite_data.get_kolon_list_from_format3(columns_dict.get("format3", ""))
+    selected_units_key = tuple(selected_units or [])
+
+    
+    cap_cc_cache = {}
+    cap_wc_cache = {}
+    wc_list_cache = {}
+
+    def _get_cap_cc_cached(cc):
+        key = (
+            table_name,
+            capacity_table_name,
+            cc,
+            selected_units_key,
+            kolon_sum,
+            kolon_sumb,
+            tuple(week_cols),
+        )
+        if key not in cap_cc_cache:
+            cap_cc_cache[key] = kapasite_data.build_capacity_table_for_cc(
+                ag, table_name, capacity_table_name, cc,
+                kolon_sum, kolon_sumb, week_cols, selected_units
+            )
+        cached_df = cap_cc_cache.get(key)
+        if cached_df is None:
+            return None
+        
+        return cached_df.copy(deep=True)
+
+    def _get_workcenters_cached(cc):
+        key = (table_name, cc)
+        if key not in wc_list_cache:
+            wc_list_cache[key] = kapasite_data.get_workcenters_for_cc(ag, table_name, cc) or []
+        
+        return list(wc_list_cache[key])
+
+    def _get_cap_wc_cached(cc, wc):
+        key = (
+            table_name,
+            capacity_table_name,
+            cc,
+            wc,
+            selected_units_key,
+            kolon_sum,
+            kolon_sumb,
+            tuple(week_cols),
+        )
+        if key not in cap_wc_cache:
+            cap_wc_cache[key] = kapasite_data.build_capacity_table_for_cc_workcenter(
+                ag, table_name, capacity_table_name, cc, wc,
+                kolon_sum, kolon_sumb, week_cols, selected_units
+            )
+        cached_df = cap_wc_cache.get(key)
+        if cached_df is None:
+            return None
+        return cached_df.copy(deep=True)
+
+    seg = cc_detail = None
+    tmark = time.perf_counter()
+    if excel_profile is not None:
+        excel_profile.setdefault("segments", defaultdict(float))
+        excel_profile.setdefault("cc_detail_sec", defaultdict(float))
+        seg = excel_profile["segments"]
+        cc_detail = excel_profile["cc_detail_sec"]
 
     # ─────────────────────────────────────────────────────────────
     # Sheet 1: 1. Accordion — Cost Center Kapasite Süresi
@@ -568,13 +910,10 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
     ws1.title = "Costcenter Kapasite"
     ws1.sheet_properties.tabColor = "1565C0"
     row1 = 1
-    # Kümülatif Toplam satırlarını topla (Sorunlu sayfasında tek tablo için)
+    
     kumulatif_rows = []
     for idx, cc in enumerate(costcenters):
-        cap_df = kapasite_data.build_capacity_table_for_cc(
-            ag, table_name, capacity_table_name, cc,
-            kolon_sum, kolon_sumb, week_cols, selected_units
-        )
+        cap_df = _get_cap_cc_cached(cc)
         cap_df = _apply_export_columns(cap_df, hidden_columns, table_columns, table_name)
         rec = _extract_kumulatif_row_from_cap_df(cap_df, cc, workcenter="Tümü")
         if rec:
@@ -591,20 +930,25 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
 
     _auto_col_widths(ws1)
 
-    # Her CC için her Workcenter'ın Kümülatif Toplam satırını ekle
+    if seg is not None:
+        seg["sheet1_costcenter_kapasite"] += time.perf_counter() - tmark
+        tmark = time.perf_counter()
+
+    
     for cc in costcenters:
-        workcenters = kapasite_data.get_workcenters_for_cc(ag, table_name, cc)
+        workcenters = _get_workcenters_cached(cc)
         for wc in workcenters:
-            cap_wc_df = kapasite_data.build_capacity_table_for_cc_workcenter(
-                ag, table_name, capacity_table_name, cc, wc,
-                kolon_sum, kolon_sumb, week_cols, selected_units
-            )
+            cap_wc_df = _get_cap_wc_cached(cc, wc)
             cap_wc_df = _apply_export_columns(cap_wc_df, hidden_columns, table_columns, table_name)
             rec = _extract_kumulatif_row_from_cap_df(cap_wc_df, cc, workcenter=wc)
             if rec:
                 kumulatif_rows.append(rec)
 
-    # CC → Excel sheet adı (detay sayfalarına link için)
+    if seg is not None:
+        seg["kumulatif_makine_satirlari"] += time.perf_counter() - tmark
+        tmark = time.perf_counter()
+
+    
     used_for_sheet = [ws1.title]
     cc_to_sheet = {}
     for cc in costcenters:
@@ -628,7 +972,7 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
             tumu_rows = [r for r in kumulatif_rows if r.get("Workcenter") == "Tümü"]
             diger_rows = [r for r in kumulatif_rows if r.get("Workcenter") != "Tümü"]
 
-            # 2. tablo için: 0 kolonu hariç satırda en az bir negatif (kırmızı) varsa satır gelsin; yoksa gelmesin. Null-only satırlar da gelmesin.
+            
             def _row_has_negative_except_zero(rec):
                 for col in week_cols_order:
                     if col == "0":
@@ -639,10 +983,10 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
                 return False
             diger_rows = [r for r in diger_rows if _row_has_negative_except_zero(r)]
 
-            display_cols_tumu = ["Costcenter"] + week_cols_order   # 1. tablo: Azot, vb. (Costcenter adı)
-            display_cols_diger = ["Workcenter"] + week_cols_order   # 2. tablo: 0 dahil, makine adı
+            display_cols_tumu = ["Costcenter"] + week_cols_order   
+            display_cols_diger = ["Workcenter"] + week_cols_order   
 
-            # 1. Tablo: Tümü — ilk kolonda Costcenter adı (Azot, vb.)
+            
             row_sorunlu = _write_sorunlu_section_title(
                 ws_sorunlu, row_sorunlu, "1. Kümülatif Toplam — Tümü (Costcenter toplamları)", s,
                 section_index=0, num_cols=len(display_cols_tumu), start_col=1
@@ -657,7 +1001,7 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
                 _write_sorunlu_empty_cell(ws_sorunlu, row_sorunlu, 1, s)
                 row_sorunlu += 4
 
-            # 2. Tablo: Makine bazlı — 0 kolonu dahil; sadece 0 dışında en az bir negatif olan satırlar
+            
             row_sorunlu = _write_sorunlu_section_title(
                 ws_sorunlu, row_sorunlu, "2. Kümülatif Toplam — Makine bazlı (sadece negatif içeren satırlar)", s,
                 section_index=1, num_cols=len(display_cols_diger), start_col=1
@@ -678,9 +1022,14 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
 
     _auto_col_widths(ws_sorunlu, first_col_width=22, other_col_width=14, date_col_width=12)
 
+    if seg is not None:
+        seg["sorunlu_sayfa"] += time.perf_counter() - tmark
+        tmark = time.perf_counter()
+
     cc_section_rows = {}
     used_sheet_names = [ws1.title, ws_sorunlu.title]
     for idx, cc in enumerate(costcenters):
+        t_cc0 = time.perf_counter()
         sheet_name = _unique_sheet_name(cc, used_sheet_names)
         used_sheet_names.append(sheet_name)
         ws_cc = wb.create_sheet(sheet_name, 2 + idx)
@@ -704,10 +1053,7 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
             section_index=0,
         )
         cc_section_rows[sheet_name]["Hepsi"] = row_hepsi
-        cap_hepsi = kapasite_data.build_capacity_table_for_cc(
-            ag, table_name, capacity_table_name, cc,
-            kolon_sum, kolon_sumb, week_cols, selected_units
-        )
+        cap_hepsi = _get_cap_cc_cached(cc)
         cap_hepsi = _add_cap_alignment_column(cap_hepsi)
         cap_hepsi = _apply_export_columns(cap_hepsi, hidden_columns, table_columns, table_name)
         row_cc = _write_table_to_sheet(
@@ -726,12 +1072,13 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
             is_section_title=False,
         )
         ws_cc.row_dimensions[row_hepsi].outlineLevel = 1
+        ws_cc.row_dimensions[row_hepsi].collapsed = True
         for r in range(row_hepsi + 1, row_cc):
             ws_cc.row_dimensions[r].outlineLevel = 2
             ws_cc.row_dimensions[r].hidden = True
 
         # 2) Her workcenter için ayrı blok: tek grup (WC başlığı + Kapasite + Malzeme). Açılışta kapalı, + ile açılır.
-        workcenters = kapasite_data.get_workcenters_for_cc(ag, table_name, cc)
+        workcenters = _get_workcenters_cached(cc)
         for wc_idx, wc in enumerate(workcenters):
             row_wc = row_cc
             row_cc = _write_table_to_sheet(
@@ -741,10 +1088,7 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
                 section_index=wc_idx + 1,
             )
             cc_section_rows[sheet_name][wc] = row_wc
-            cap_wc = kapasite_data.build_capacity_table_for_cc_workcenter(
-                ag, table_name, capacity_table_name, cc, wc,
-                kolon_sum, kolon_sumb, week_cols, selected_units
-            )
+            cap_wc = _get_cap_wc_cached(cc, wc)
             cap_wc = _add_cap_alignment_column(cap_wc)
             cap_wc = _apply_export_columns(cap_wc, hidden_columns, table_columns, table_name)
             row_cc = _write_table_to_sheet(
@@ -763,13 +1107,29 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
                 is_section_title=False,
             )
             ws_cc.row_dimensions[row_wc].outlineLevel = 1
+            ws_cc.row_dimensions[row_wc].collapsed = True
             for r in range(row_wc + 1, row_cc):
                 ws_cc.row_dimensions[r].outlineLevel = 2
                 ws_cc.row_dimensions[r].hidden = True
 
-        # 1, 2, 3, 4 butonları kapalı; sadece her başlığın yanındaki + / - görünür. +/- Excel’de gruplarla birlikte gelir, ayrı kapatılamaz.
-        ws_cc.sheet_view.showOutlineSymbols = False
+        # Grup sembollerini göster: satırlar başlangıçta kapalı gelir, kullanıcı + / - ile açıp kapatır.
+        ws_cc.sheet_view.showOutlineSymbols = True
+        try:
+            # Bazı Excel sürümlerinde sadece sheet_view yetmez; outlinePr da açık olmalı.
+            ws_cc.sheet_properties.outlinePr.showOutlineSymbols = True
+            ws_cc.sheet_properties.outlinePr.summaryBelow = False
+            ws_cc.sheet_properties.outlinePr.summaryRight = True
+            ws_cc.sheet_properties.outlinePr.applyStyles = True
+        except Exception:
+            pass
         _auto_col_widths(ws_cc)
+
+        if cc_detail is not None:
+            cc_detail[cc] += time.perf_counter() - t_cc0
+
+    if seg is not None:
+        seg["cc_detay_sayfalari"] += time.perf_counter() - tmark
+        tmark = time.perf_counter()
 
     # Sorunlu Kapasite sayfasındaki Costcenter hücresine tıklanınca ilgili detay sayfasına git
     from openpyxl.styles import Font
@@ -794,8 +1154,16 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
             underline="single",
         )
 
+    if seg is not None:
+        seg["hyperlinkler"] += time.perf_counter() - tmark
+        tmark = time.perf_counter()
+
     buffer = io.BytesIO()
+    t_save0 = time.perf_counter()
     wb.save(buffer)
+    if seg is not None:
+        seg["workbook_save"] += time.perf_counter() - t_save0
+
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -803,7 +1171,22 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
 # ─────────────────────────────────────────────────────────────────────────────
 # LAYOUT
 # ─────────────────────────────────────────────────────────────────────────────
+# Dashboard ile aynı callback ID'leri (gizli): /raporlama açıkken renderer hatası olmasın.
 layout = dbc.Container([
+    html.Div(
+        [
+            dcc.Dropdown(
+                id='data-type-dropdown',
+                options=["İhtiyaç Miktarı", "Sipariş Miktarı", "Öngörü Miktarı"],
+                value="İhtiyaç Miktarı",
+                style={'display': 'none'},
+            ),
+            html.Div(id='veri-tipi-loading-hint', style={'display': 'none'}),
+            dcc.Interval(id='veri-tipi-load-hide', interval=2000, n_intervals=0, disabled=True),
+        ],
+        style={'display': 'none'},
+        className='kap-raporlama-dash-stubs',
+    ),
     html.Div([
         html.Div([
             html.Span("◈", className="kap-header-icon"),
@@ -855,6 +1238,7 @@ layout = dbc.Container([
                 [html.Span("⬇ ", style={"marginRight": "6px"}), "Raporu Oluştur ve İndir"],
                 id="raporlama-btn-generate",
                 n_clicks=0,
+                disabled=False,
                 className="kap-btn kap-btn-primary",
             ),
             dcc.Download(id="raporlama-download"),
@@ -865,57 +1249,112 @@ layout = dbc.Container([
 ], fluid=True, className="kap-control-panel")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Ortak ZIP oluşturma (Raporlama sayfası + Kapasite sayfası butonu birebir aynı)
-# ─────────────────────────────────────────────────────────────────────────────
+
 def build_raporlama_zip(ag_instance, hidden_columns=None, table_columns=None):
-    """İhtiyaç, Sipariş, Öngörü için ayrı Excel'leri oluşturur, tek ZIP döndürür.
-    Kapasite ekranından çağrıldığında sadece tablo kolon filtreleri (Kolonları Göster/Gizle) yansır.
-    Birim, cost center vb. şartlar raporlama sayfasının kendi ayarına göre (örn. saat) kalır."""
+    
     if ag_instance is None:
         return None, []
     selected_units = ["hours"]
     zip_buffer = io.BytesIO()
     created = []
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for label, table_name, capacity_table_name, period in DATA_TYPES:
-            try:
-                df_cc = ag_instance.run_query(f"SELECT DISTINCT STAND FROM [{table_name}] ORDER BY STAND")
-                if df_cc is None or df_cc.empty:
+    do_prof = _rapor_profile_enabled()
+    prof = (
+        {
+            "sql_sec": 0.0,
+            "sql_calls": 0,
+            "by_table": defaultdict(float),
+            "slow_queries": [],
+        }
+        if do_prof
+        else None
+    )
+    per_excel_rows = []
+    zip_t0 = time.perf_counter()
+    prof_ctx = _RunQueryProfiler(prof) if prof is not None else nullcontext()
+    db_ctx = run_agent.use_connection() if hasattr(run_agent, "use_connection") else nullcontext()
+    with prof_ctx, db_ctx:
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for label, table_name, capacity_table_name, period in DATA_TYPES:
+                try:
+                    df_cc = ag_instance.run_query(f"SELECT DISTINCT STAND FROM [{table_name}] ORDER BY STAND")
+                    if df_cc is None or df_cc.empty:
+                        continue
+                    all_cc_list = df_cc["STAND"].tolist()
+                    # Single costcenter override (deneme)
+                    if RAPORLAMA_SINGLE_COSTCENTER is not None:
+                        if RAPORLAMA_SINGLE_COSTCENTER == "__AUTO__":
+                            costcenters = [all_cc_list[0]] if all_cc_list else []
+                        else:
+                            costcenters = (
+                                [RAPORLAMA_SINGLE_COSTCENTER]
+                                if RAPORLAMA_SINGLE_COSTCENTER in set(all_cc_list)
+                                else []
+                            )
+                    else:
+                        
+                        if RAPORLAMA_COSTCENTERS:
+                            all_cc = set(all_cc_list)
+                            costcenters = [cc for cc in RAPORLAMA_COSTCENTERS if cc in all_cc]
+                        else:
+                            costcenters = all_cc_list
+                    if not costcenters:
+                        continue
+                except Exception as e:
+                    import traceback
+                    print(f"[Raporlama] Sorgu hatası ({table_name}): {e}")
+                    traceback.print_exc()
                     continue
-                all_cc_list = df_cc["STAND"].tolist()
-                # RAPORLAMA_COSTCENTERS doluysa sadece onları al; boşsa tablodaki tüm cost center'lar
-                if RAPORLAMA_COSTCENTERS:
-                    all_cc = set(all_cc_list)
-                    costcenters = [cc for cc in RAPORLAMA_COSTCENTERS if cc in all_cc]
+                if period == "weekly":
+                    columns_dict = kapasite_data.generate_weekly_columns()
                 else:
-                    costcenters = all_cc_list
-                if not costcenters:
-                    continue
-            except Exception as e:
-                import traceback
-                print(f"[Raporlama] Sorgu hatası ({table_name}): {e}")
-                traceback.print_exc()
-                continue
-            if period == "weekly":
-                columns_dict = kapasite_data.generate_weekly_columns()
-            else:
-                columns_dict = kapasite_data.generate_monthly_columns_filtered(ag_instance, table_name, capacity_table_name)
-            excel_bytes = _build_rapor_excel(
-                costcenters, table_name, capacity_table_name, columns_dict, selected_units,
-                hidden_columns=hidden_columns, table_columns=table_columns,
-            )
-            if excel_bytes:
-                safe_name = (label
-                             .replace(" ", "_")
-                             .replace("ı", "i").replace("İ", "I")
-                             .replace("ö", "o").replace("Ö", "O")
-                             .replace("ü", "u").replace("Ü", "U")
-                             .replace("ş", "s").replace("Ş", "S")
-                             .replace("ç", "c").replace("Ç", "C")
-                             .replace("ğ", "g").replace("Ğ", "G"))
-                zf.writestr(f"kapasite_rapor_{safe_name}.xlsx", excel_bytes)
-                created.append(f"{label} ({len(costcenters)} CC)")
+                    columns_dict = kapasite_data.generate_monthly_columns_filtered(
+                        ag_instance, table_name, capacity_table_name
+                    )
+                sql_before_excel = prof["sql_sec"] if prof is not None else 0.0
+                t_excel_wall0 = time.perf_counter()
+                excel_profile = (
+                    {"segments": defaultdict(float), "cc_detail_sec": defaultdict(float)}
+                    if do_prof
+                    else None
+                )
+                excel_bytes = _build_rapor_excel(
+                    costcenters, table_name, capacity_table_name, columns_dict, selected_units,
+                    hidden_columns=hidden_columns, table_columns=table_columns,
+                    excel_profile=excel_profile,
+                )
+                t_excel_wall = time.perf_counter() - t_excel_wall0
+                if excel_bytes:
+                    safe_name = (label
+                                 .replace(" ", "_")
+                                 .replace("ı", "i").replace("İ", "I")
+                                 .replace("ö", "o").replace("Ö", "O")
+                                 .replace("ü", "u").replace("Ü", "U")
+                                 .replace("ş", "s").replace("Ş", "S")
+                                 .replace("ç", "c").replace("Ç", "C")
+                                 .replace("ğ", "g").replace("Ğ", "G"))
+                    zf.writestr(f"kapasite_rapor_{safe_name}.xlsx", excel_bytes)
+                    created.append(f"{label} ({len(costcenters)} CC)")
+                    if prof is not None and excel_profile is not None:
+                        sql_in_excel = prof["sql_sec"] - sql_before_excel
+                        segs = dict(excel_profile["segments"])
+                        save_sec = float(segs.get("workbook_save", 0.0))
+                        cc_top = sorted(
+                            excel_profile["cc_detail_sec"].items(),
+                            key=lambda x: -x[1],
+                        )[:10]
+                        per_excel_rows.append({
+                            "label": label,
+                            "wall_sec": t_excel_wall,
+                            "sql_sec": sql_in_excel,
+                            "non_sql_sec": max(0.0, t_excel_wall - sql_in_excel),
+                            "save_sec": save_sec,
+                            "cc_count": len(costcenters),
+                            "segments": segs,
+                            "cc_detail_top": cc_top,
+                        })
+    zip_wall_sec = time.perf_counter() - zip_t0
+    if prof is not None:
+        _print_rapor_timing_report(zip_wall_sec, prof, per_excel_rows)
     zip_buffer.seek(0)
     return zip_buffer.getvalue() if created else None, created
 
@@ -933,16 +1372,52 @@ def raporlama_generate(n_clicks):
     if not n_clicks:
         raise PreventUpdate
     if ag is None:
-        return no_update, dbc.Alert("Veritabanı bağlantısı yok. Lütfen bağlantıyı kontrol edin.", color="danger")
+        email_sent, email_msg = _send_report_notification_email(
+            status="BASARISIZ",
+            detail="Veritabani baglantisi yok.",
+            created_reports=[],
+        )
+        email_color = "success" if email_sent else "warning"
+        return no_update, html.Div([
+            dbc.Alert("Veritabanı bağlantısı yok. Lütfen bağlantıyı kontrol edin.", color="danger"),
+            dbc.Alert(email_msg, color=email_color),
+        ])
     try:
         zip_bytes, created = build_raporlama_zip(ag)
     except Exception as e:
+        email_sent, email_msg = _send_report_notification_email(
+            status="BASARISIZ",
+            detail=f"Rapor olusturma hatasi: {e!r}",
+            created_reports=[],
+        )
+        email_color = "success" if email_sent else "warning"
         return no_update, dbc.Alert(
-            f"Rapor oluşturulurken hata: Veritabanı bağlantısı kurulamıyor veya sorgu hatası. ({e!r})",
+            [
+                f"Rapor oluşturulurken hata: Veritabanı bağlantısı kurulamıyor veya sorgu hatası. ({e!r})",
+                dbc.Alert(email_msg, color=email_color, className="mt-2"),
+            ],
             color="danger",
         )
     if not zip_bytes:
-        return no_update, dbc.Alert("Hiçbir veri tipi için rapor oluşturulamadı. Veritabanında veri olmayabilir.", color="warning")
+        email_sent, email_msg = _send_report_notification_email(
+            status="BASARISIZ",
+            detail="Hicbir veri tipi icin rapor olusturulamadi.",
+            created_reports=[],
+        )
+        email_color = "success" if email_sent else "warning"
+        return no_update, html.Div([
+            dbc.Alert("Hiçbir veri tipi için rapor oluşturulamadı. Veritabanında veri olmayabilir.", color="warning"),
+            dbc.Alert(email_msg, color=email_color),
+        ])
+
+    email_sent, email_msg = _send_report_notification_email(
+        status="BASARILI",
+        detail="ZIP dosyasi basariyla olusturuldu ve indirildi.",
+        created_reports=created,
+        attachment_bytes=zip_bytes,
+        attachment_name="kapasite_raporlar.zip",
+    )
+    email_color = "success" if email_sent else "warning"
     return (
         dict(
             content=base64.b64encode(zip_bytes).decode("ascii"),
@@ -950,5 +1425,8 @@ def raporlama_generate(n_clicks):
             base64=True,
             type="application/zip",
         ),
-        dbc.Alert(f"Raporlar oluşturuldu: {', '.join(created)}. ZIP indiriliyor.", color="success"),
+        html.Div([
+            dbc.Alert(f"Raporlar oluşturuldu: {', '.join(created)}. ZIP indiriliyor.", color="success"),
+            dbc.Alert(email_msg, color=email_color),
+        ]),
     )

@@ -22,8 +22,11 @@ def _to_numeric_slice(df, start_col_index=1):
 def _div_safe(df, start_col_index, divisor):
     if df is None or df.empty or start_col_index >= df.shape[1]:
         return
-    num_part = df.iloc[:, start_col_index:].apply(pd.to_numeric, errors="coerce")
-    df.iloc[:, start_col_index:] = num_part / divisor
+    target_cols = list(df.columns[start_col_index:])
+    
+    for col in target_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+    df.loc[:, target_cols] = df.loc[:, target_cols].div(divisor)
 
 
 
@@ -370,8 +373,7 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
 
 
 def build_workcenter_yuk_table_for_cc(ag_instance, table_name, costcenter, kolon_sum_str, selected_units=("hours",), capacity_table_name=None):
-    """Yük tablosu: CAPWORK + hafta/ay kolonları + Verimlilik (VLFVARDIYASURE).
-    Sıra dashboard ile aynı: önce sayısal dönüşüm (round, saat/vardiya), sonra Verimlilik kolonu eklenir."""
+   
     if not costcenter or not table_name or not kolon_sum_str:
         return None
     try:

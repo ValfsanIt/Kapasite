@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
-"""
-KAPASITE bağımsız uygulaması – Dash app, cache ve sabitler.
-"""
+
 import os
 import dash
 import dash_bootstrap_components as dbc
+from dash import html, dcc, Input, Output
 
-# Proje kökü (PyCharm/Cursor fark etmez, her zaman app.py'nin bulunduğu klasör)
+
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 _ASSETS = os.path.join(_ROOT, "assets")
 
@@ -23,7 +22,7 @@ for name in ("custom.css", "mes_styles.css"):
         except Exception:
             pass
 
-# Bootstrap teması + assets klasörü mutlak yol (PyCharm'da da doğru yüklensin)
+
 app = dash.Dash(
     __name__,
     use_pages=False,
@@ -32,7 +31,7 @@ app = dash.Dash(
     assets_folder=_ASSETS,
 )
 
-# Cache (şu an kullanılmıyor; ileride flask_caching eklenebilir)
+
 class _SimpleCache:
     def memoize(self, timeout=300):
         def decorator(f):
@@ -44,5 +43,20 @@ TIMEOUT = 300  # saniye
 
 # Sayfa modüllerini yükle (callback'ler app'e kayıt olur), layout'u bağla
 import kapasite
-import raporlama
-app.layout = kapasite.layout
+
+app.layout = html.Div([
+    dcc.Location(id="url", refresh=False),
+    dbc.Nav(
+        [
+            dbc.NavLink("Kapasite Dashboard", href="/", active="exact"),
+        ],
+        pills=True,
+        className="m-3",
+    ),
+    html.Div(id="page-content"),
+])
+
+
+@app.callback(Output("page-content", "children"), Input("url", "pathname"))
+def _render_page(pathname):
+    return kapasite.layout

@@ -8,6 +8,35 @@ database_iot = 'VALFAN_IOT_001'
 username = 'pythonreporter'
 password = '1212casecase,,'
 
+# Mail ayarları
+# MAIL_MODE:
+# - "o365": smtp.office365.com:587 + STARTTLS + AUTH
+# - diğer: Yerel Exchange relay (mail.valfsan.com.tr:25, auth yok)
+MAIL_MODE = "relay"  # "o365" veya "relay"
+
+if MAIL_MODE == "o365":
+    mail_server = "smtp.office365.com"
+    mail_port = 587
+    SMTP_USE_STARTTLS = True
+    SMTP_REQUIRE_AUTH = True
+    SMTP_USERNAME = "canias@valfsan.com.tr"
+    SMTP_PASSWORD = ""
+else:
+    # Yerel Exchange relay
+    mail_server = "mail.valfsan.com.tr"
+    mail_port = 25
+    SMTP_USE_STARTTLS = False
+    SMTP_REQUIRE_AUTH = False
+    # Gönderici (From) — auth kapalıyken yalnızca raporlama.py içindeki From alanı için kullanılır
+    SMTP_USERNAME = "canias@valfsan.com.tr"
+    SMTP_PASSWORD = ""
+
+# Raporlama e-posta alıcıları (çoklu destek)
+# İleride kişi eklenecekse sadece bu listeleri güncellemeniz yeterli.
+RAPORLAMA_NOTIFY_TO = ["dayyildiz@valfsan.com.tr"]
+RAPORLAMA_NOTIFY_CC = []
+RAPORLAMA_NOTIFY_BCC = []
+
 
 
 reengen_username = "takgun@valfsan.com.tr"

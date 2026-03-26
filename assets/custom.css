@@ -151,11 +151,7 @@
       background-color: rgba(234, 79, 5, 0.47)!important;
   }
   
-  /*################################*/
-  
-  /* img {
-      border-radius: 10px;
-  } */
+ 
   
   .valfsan-logo {
       width: 150px;
@@ -677,19 +673,19 @@
   }
   
   .dropdown-style {
-      /*color: black; !* Set font color to black *!*/
+      
       width: 150px;
     
   
-      /* Purple background color */
+      
       text-align: center;
       display: inline-block;
       transition-duration: 0.4s;
-      /* Transition effect duration */
+      
       border-radius: 0;
-      /* Square shape */
+      
       padding: 0;
-      /* No padding */
+      
   }
   
   .Select-control {
@@ -719,33 +715,33 @@
   
   #Dropdown AyarlarÄ± #Dropdown AyarlarÄ± #Dropdown AyarlarÄ± #Dropdown AyarlarÄ± .estop-button {
       width: 100px;
-      /* width of the square button */
+      
       height: 100px;
-      /* height of the square button */
+      
       background-color: #2149b4;
-      /* button color */
+      
       border: none;
-      /* no border */
+     
       color: white;
-      /* text (icon) color */
+      
   
       text-align: center;
       display: inline-block;
       font-size: 48px;
-      /* icon size */
+      
       transition-duration: 0.4s;
-      /* transition effect duration */
+      
       cursor: pointer;
       border-radius: 0;
-      /* square shape */
+      
       overflow: hidden;
-      /* in case of text exceeding button size */
+      
       padding: 0;
-      /* no padding */
+     
       position: absolute;
-      /* no padding */
+      
       left: 300px;
-      /* right edge positioned at 0 units from the right edge of its nearest positioned ancestor */
+      
   
       top: 34px;
       color: whitesmoke;
@@ -753,39 +749,39 @@
   
   .estop-button:hover {
       background-color: #45a049;
-      /* color when mouse hovers over */
+      
       color: white;
   }
   
   .wc-button {
       width: 100px;
-      /* width of the square button */
+      
       height: 100px;
-      /* height of the square button */
+      
       background-color: #2149b4;
-      /* button color */
+      
       border: none;
       /* no border */
       color: white;
-      /* text (icon) color */
+     
   
       text-align: center;
       display: inline-block;
       font-size: 48px;
       /* icon size */
       transition-duration: 0.4s;
-      /* transition effect duration */
+      
       cursor: pointer;
       border-radius: 0;
       /* square shape */
       overflow: hidden;
-      /* in case of text exceeding button size */
+      
       padding: 0;
       /* no padding */
       position: absolute;
       /* no padding */
       left: 300px;
-      /* right edge positioned at 0 units from the right edge of its nearest positioned ancestor */
+      
       top: 10px;
   
   }
@@ -826,7 +822,7 @@
       position: absolute;
       /* no padding */
       left: 408px;
-      /* right edge positioned at 0 units from the right edge of its nearest positioned ancestor */
+      
       top: 10px;
       
   }
@@ -1035,7 +1031,7 @@
   
   }
   .svg-container {
-      width: 200px;         /*burasÄ± grafiÄŸin bulunduÄŸu div'in boyunu kÄ±saltÄ±yor*/
+      width: 200px;         
   }
   .dash-date-picker-multi input {
       background-color: #2149b4;
@@ -1068,42 +1064,15 @@
       padding: 0;
       /* no padding */
   
-      /*position: absolute;  !* position relative to the closest positioned ancestor *!*/
-      /*left: 500px;  !* right edge positioned at 0 units from the right edge of its nearest positioned ancestor *!*/
-      /*top: 100px;   !* top edge positioned at -1 units from the top edge of its nearest positioned ancestor *!*/
-  
   }
-  
-  /*@media only screen and (max-width: 600px) {*/
-  /*    .dash-graph-container {*/
-  /*        height: 300px !important;*/
-  /*        !* Adjust according to your need *!*/
-  /*    }*/
-  /*}*/
-  
-  /*.container-fluid {*/
-  /*    padding-left: 0;*/
-  /*    padding-right: 0;*/
-  /*}*/
-  
-  /*#my-specific-container {*/
-  /*    padding-left: 0;*/
-  /*    padding-right: 0;*/
-  /*}*/
-  
-  /* custom.css */
+      
   .plot-container .legend {
     background-color: rgba(255, 255, 255, 0.5) !important; /* Your desired color with semi-transparency */
   }
   
   
   
-  /*################################*/
-  /*################################*/
-  /*  KAPASÄ°TE ANALÄ°Z AÃ‡IK TEMA v8  */
-  /*################################*/
-  
-  /* â”€â”€ CSS DeÄŸiÅŸkenleri â€” AÃ‡IK TEMA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+ 
   :root {
     --kap-cyan:       #2563eb;
     --kap-cyan-dim:   rgba(37,99,235,0.12);
@@ -1124,6 +1093,7 @@
     --kap-font-disp:  'Inter', sans-serif;
     --kap-topbar-h:   56px;
     --kap-panel-header-h: 120px;
+  }
   .kap-page-container {
     background: #0f172a;
     min-height: 100vh;
@@ -1237,6 +1207,52 @@
     position: relative;
     z-index: 1;
   }
+
+  /* Veri tipi değişimi: başlık düzenine dokunmaz (absolute); sol boşlukta belirir */
+  .kap-header-veri-tipi-loading {
+    position: absolute;
+    left: 36px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 2;
+    flex-direction: row;
+    align-items: center;
+    gap: 16px;
+    max-width: min(520px, 50vw);
+    padding: 11px 18px 11px 15px;
+    border-radius: 14px;
+    pointer-events: none;
+    user-select: none;
+    box-sizing: border-box;
+    background: linear-gradient(
+      135deg,
+      rgba(28, 25, 22, 0.92) 0%,
+      rgba(55, 38, 20, 0.78) 48%,
+      rgba(42, 30, 18, 0.88) 100%
+    );
+    border: 1.5px solid rgba(245, 158, 11, 0.5);
+    box-shadow:
+      0 0 0 1px rgba(251, 191, 36, 0.12),
+      0 8px 28px rgba(0, 0, 0, 0.4),
+      0 0 36px rgba(245, 158, 11, 0.2);
+    animation: kap-header-loading-card-pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes kap-header-loading-card-pulse {
+    0%, 100% {
+      box-shadow:
+        0 0 0 1px rgba(251, 191, 36, 0.1),
+        0 8px 28px rgba(0, 0, 0, 0.38),
+        0 0 28px rgba(245, 158, 11, 0.15);
+      border-color: rgba(245, 158, 11, 0.45);
+    }
+    50% {
+      box-shadow:
+        0 0 0 1px rgba(252, 211, 77, 0.2),
+        0 10px 32px rgba(0, 0, 0, 0.45),
+        0 0 44px rgba(251, 191, 36, 0.32);
+      border-color: rgba(252, 211, 77, 0.72);
+    }
+  }
   
   .kap-header-icon {
     font-size: 2.8rem;
@@ -1338,6 +1354,55 @@
     padding-top: 2px;
     line-height: 1.4;
     overflow: visible;
+  }
+
+  /* Veri tipi: başlıktaki yükleme spinner (temel + büyük header sürümü) */
+  .kap-veri-tipi-spinner {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(148, 196, 255, 0.28);
+    border-top-color: rgba(96, 165, 250, 0.95);
+    border-radius: 50%;
+    flex-shrink: 0;
+    animation: kap-veri-tipi-spin 0.65s linear infinite;
+    box-sizing: border-box;
+  }
+  .kap-veri-tipi-spinner--header {
+    width: 44px;
+    height: 44px;
+    border-width: 4px;
+    border-color: rgba(245, 158, 11, 0.22);
+    border-top-color: #fde68a;
+    box-shadow:
+      0 0 20px rgba(245, 158, 11, 0.35),
+      0 0 10px rgba(251, 191, 36, 0.25);
+    animation: kap-veri-tipi-spin 0.55s linear infinite;
+    filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.55));
+  }
+  @keyframes kap-veri-tipi-spin {
+    to { transform: rotate(360deg); }
+  }
+  .kap-veri-tipi-loading-text {
+    color: rgba(226, 232, 240, 0.95);
+    font-family: var(--kap-font-body, 'Inter', sans-serif);
+  }
+  .kap-veri-tipi-loading-text--header {
+    font-family: var(--kap-font-disp, var(--kap-font-body, 'Inter', sans-serif));
+    font-size: 1.32rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    color: #fff7ed;
+    line-height: 1.2;
+    text-shadow:
+      0 0 22px rgba(245, 158, 11, 0.45),
+      0 0 10px rgba(251, 191, 36, 0.35),
+      0 2px 12px rgba(0, 0, 0, 0.5);
+    animation: kap-header-loading-text-shine 1.4s ease-in-out infinite;
+  }
+  @keyframes kap-header-loading-text-shine {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.88; }
   }
   
   .kap-control-panel .kap-year-wrap {
@@ -2195,7 +2260,7 @@
   .kap-page-container .dash-cell,
   .kap-page-container td.dash-cell {
     color: #0d1b2a;
-    /* background-color yok: koÅŸullu formatlama (kÄ±rmÄ±zÄ±/gri) style_data_conditional ile gelsin */
+    
     font-size: 13.5px !important;
     font-family: 'Inter', 'Segoe UI', sans-serif !important;
   }
@@ -2221,13 +2286,13 @@
   
   .kap-graph {
     flex: 1 1 auto;
-    min-height: 220px; /* reduced to fit stacked layout better */
+    min-height: 220px; 
     width: 100%;
   }
   .kap-stack-block {
     display: flex;
     flex-direction: column;
-    gap: 12px; /* ensure consistent spacing between graph/table blocks */
+    gap: 12px; 
   }
   .kap-full-panel .plotly-graph-div {
     margin-bottom: 6px;
@@ -2467,7 +2532,7 @@
   width: 100%;
   }
   
-  /* Grafik tam geniÅŸlik */
+  
   .kap-fullscreen-panel .js-plotly-plot,
   .kap-fullscreen-panel .plotly-graph-div {
   width: 100% !important;
@@ -2757,8 +2822,7 @@
   }
   
   
-  .kap-fullscreen-panel .dash-spreadsheet td.dash-cell.focused,
-  .kap-fullscreen-panel .dash-spreadsheet td.dash-cell.cell--selected {
+  .kap-fullscreen-panel .dash-spreadsheet td.dash-cell.focused {
     background-color: inherit !important;
     box-shadow: none !important;
     outline: none !important;
@@ -2860,7 +2924,7 @@
     box-sizing: border-box;
   }
   
-  /* Tab buton temel stili */
+  
   .kap-tab-btn {
     padding: 9px 22px;
     border: 2px solid transparent;
@@ -3169,7 +3233,7 @@
     letter-spacing: -0.02em !important;
   }
   
-  /* Sol kenar vurgu Ã§izgisi */
+  
   .kap-accordion .accordion-item:nth-child(1) .accordion-button {
     border-left: 4px solid #3b82f6 !important;
   }
@@ -3285,6 +3349,12 @@
     outline: none !important;
     box-shadow: none !important;
   }
+  
+  /* Excel benzeri seçim yapısını açık bıraktık; ama görsel seçimi kaldırıyoruz */
+  .dash-spreadsheet td.cell--selected {
+    outline: none !important;
+    box-shadow: none !important;
+  }
   .dash-spreadsheet td {
     cursor: pointer !important;
   }
@@ -3372,7 +3442,7 @@
       0 1px 0 rgba(255,255,255,0.1) inset;
   }
   
-  /* â”€â”€ KART GRADÄ°ENT VARYANTLARÄ± â”€â”€ */
+  
   .gradient-cyan {
     background: linear-gradient(135deg, #0f3460 0%, #1565c0 60%, #1e88e5 100%);
   }
@@ -3934,7 +4004,7 @@
     }
   }
 
-  /* KÃ¼Ã§Ã¼k ekran YATAY */
+  
   @media (max-width: 768px) and (orientation: landscape) {
     .kap-graph-container .js-plotly-plot,
     .kap-graph-container .plotly-graph-div {
@@ -3942,7 +4012,7 @@
     }
   }
 
-  /* Ã‡ok kÃ¼Ã§Ã¼k ekran (telefon portrait) */
+  
   @media (max-width: 480px) and (orientation: portrait) {
     .dash-table-container .dash-cell,
     .dash-table-container .dash-header {
@@ -3966,6 +4036,21 @@
       padding: 12px 16px !important;
       flex-wrap: wrap;
       gap: 8px;
+    }
+    .kap-header-veri-tipi-loading {
+      left: 14px !important;
+      max-width: calc(100% - 28px) !important;
+      padding: 8px 12px !important;
+      gap: 12px !important;
+    }
+    .kap-veri-tipi-spinner--header {
+      width: 34px !important;
+      height: 34px !important;
+      border-width: 3px !important;
+    }
+    .kap-veri-tipi-loading-text--header {
+      font-size: 0.95rem !important;
+      letter-spacing: 0.04em !important;
     }
     .kap-header-icon {
       font-size: 1.5rem !important;
@@ -4120,7 +4205,7 @@
     }
   }
 
-  /* Daha dar ekran â€” daha da kompakt */
+  
   @media (max-width: 768px) {
     .kap-page-header .kap-header-sub {
       display: none;
@@ -4230,4 +4315,7 @@
       overflow: hidden !important;
     }
   }
+.dash-table-container .show-hide,
+.dash-table-container .dash-spreadsheet-menu .show-hide {
+  display: none !important;
 }
