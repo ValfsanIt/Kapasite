@@ -148,7 +148,7 @@ def _print_rapor_timing_report(zip_wall_sec, prof, per_excel_rows):
         "=" * 72,
         f"  ZIP toplam (duvar saati):     {zip_wall_sec:,.2f} s",
         f"  SQL toplam (run_query):       {prof['sql_sec']:,.2f} s  ({prof['sql_calls']} çağrı)",
-        f"  ZIP − SQL (Excel+pandas+zip): {max(0.0, zip_wall_sec - prof['sql_sec']):,.2f} s",
+        f"  ZIP - SQL (Excel+pandas+zip): {max(0.0, zip_wall_sec - prof['sql_sec']):,.2f} s",
         "",
         "  En çok süren SQL tablo grupları (FROM/JOIN [..] özeti, üst 12):",
     ]
@@ -184,7 +184,10 @@ def _print_rapor_timing_report(zip_wall_sec, prof, per_excel_rows):
             for cc, sec in cc_top:
                 lines.append(f"          {sec:7.2f} s  {cc}")
     lines.append("=" * 72)
-    print("\n".join(lines))
+    try:
+        print("\n".join(lines))
+    except UnicodeEncodeError:
+        print("\n".join(lines).encode("ascii", "replace").decode("ascii"))
 
 
 def _send_report_notification_email(status, detail, created_reports=None, attachment_bytes=None, attachment_name="kapasite_raporlar.zip"):
@@ -378,6 +381,37 @@ def _build_styles():
     s["sorunlu_section_fills"] = [PatternFill("solid", fgColor=c) for c in section_colors]
     s["sec_fills"] = [PatternFill("solid", fgColor=c) for c in section_colors]
 
+    # Kapalı bloklarda görünen mini özet: sol başlıktan sakin; kart zemin; vurgu sadece oran satırı / son hücre
+    thin_line = Side(style="thin", color="90A4AE")
+    s["mini_card_fill"] = PatternFill("solid", fgColor="F2F5F8")
+    s["mini_card_border_side"] = Side(style="thin", color="78909C")
+    s["mini_card_border"] = Border(
+        left=s["mini_card_border_side"],
+        right=s["mini_card_border_side"],
+        top=s["mini_card_border_side"],
+        bottom=s["mini_card_border_side"],
+    )
+    s["mini_gutter_border"] = Border(right=Side(style="thin", color="B0BEC5"))
+    s["mini_title_font"] = Font(name="Arial", bold=True, color="546E7A", size=9)
+    s["mini_title_fill"] = PatternFill("solid", fgColor="E8ECEF")
+    s["mini_hdr_font"] = Font(name="Arial", bold=True, color="455A64", size=9)
+    s["mini_hdr_fill"] = PatternFill("solid", fgColor="DCDFE3")
+    s["mini_hdr_border"] = Border(
+        left=thin_line, right=thin_line, top=thin_line, bottom=thin_line
+    )
+    s["mini_label_font"] = Font(name="Arial", bold=True, color="37474F", size=9)
+    s["mini_label_fill"] = PatternFill("solid", fgColor="ECEFF1")
+    s["mini_data_font"] = Font(name="Arial", size=9, color="263238")
+    s["mini_ratio_font"] = Font(name="Arial", bold=True, color="1A237E", size=9)
+    s["mini_ratio_row_fill"] = PatternFill("solid", fgColor="FFF9C4")
+    s["mini_ratio_row_label_font"] = Font(name="Arial", bold=True, color="5D4037", size=9)
+    s["mini_ratio_row_value_font"] = Font(name="Arial", bold=True, color="4E342E", size=9)
+    s["mini_ratio_last_cell_fill"] = PatternFill("solid", fgColor="6A1B9A")
+    s["mini_ratio_last_cell_font"] = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+
+    s["detail_anchor_font"] = Font(name="Arial", bold=True, color="0D47A1", size=10)
+    s["detail_anchor_fill"] = PatternFill("solid", fgColor="E1F5FE")
+
     return s
 
 
@@ -495,15 +529,48 @@ def _format_df_turkish_thousands(df):
 
 def _parse_cell_to_float(val):
     
-    if val is None or (isinstance(val, float) and pd.isna(val)):
+    if val is None:
         return None
-    if isinstance(val, (int, float)):
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
         return float(val)
     s = str(val).strip().replace(".", "").replace(",", ".")
     try:
         return float(s)
     except Exception:
         return None
+
+
+def _dash_like_capacity_excel_number(num_val):
+    """Dash Kapasite STAT tabloları: tamsayı, 0 → boş (raporda da aynı)."""
+    if num_val is None:
+        return None
+    try:
+        if pd.isna(num_val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    x = float(num_val)
+    if pd.isna(x):
+        return None
+    iv = int(round(x, 0))
+    return None if iv == 0 else iv
+
+
+def _excel_safe_value(val):
+    """openpyxl uyumu: pandas NA/NaN -> None."""
+    if val is None:
+        return None
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return val
 
 
 def _display_blank_if_zero(val):
@@ -592,7 +659,7 @@ def _write_sorunlu_table_to_sheet(ws, start_row, df, s, start_col=1):
             val = r.get(col_name)
             if c_idx >= 3:
                 val = _display_blank_if_zero(val)
-            cell = ws.cell(row=row, column=start_col + c_idx - 1, value=val)
+            cell = ws.cell(row=row, column=start_col + c_idx - 1, value=_excel_safe_value(val))
             cell.alignment = Alignment(horizontal="right" if c_idx >= 3 else "left", vertical="center")
             cell.border = s["data_border"]
             if c_idx == 1:
@@ -619,6 +686,32 @@ def _write_sorunlu_empty_cell(ws, row, col, s):
     cell.border = s["data_border"]
 
 
+def _merge_section_title_row(ws, row, s, end_col=3):
+    """Hepsi / Workcenter satırı: A–(end_col) birleştir, sağa mini tablo için yer açılır."""
+    from openpyxl.styles import Alignment
+    cell = ws.cell(row=row, column=1)
+    if cell.value is None:
+        return
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=end_col)
+    cell.alignment = s["sec_align"]
+
+
+def _write_detail_block_anchor_row(ws, row, text, s, merge_end_col=3):
+    """
+    Grup açıldığında Kapasite/Malzeme'nin hemen üstünde görünen çapa satırı.
+    (Üstteki özet satırı + mini tablo kaydırıldığında kullanıcı hangi WC'de olduğunu kaybetmesin.)
+    """
+    from openpyxl.styles import Alignment
+    c = ws.cell(row=row, column=1, value=text)
+    c.font = s["detail_anchor_font"]
+    c.fill = s["detail_anchor_fill"]
+    c.alignment = Alignment(horizontal="left", vertical="center", indent=2, wrap_text=True)
+    c.border = s["data_border"]
+    if merge_end_col > 1:
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=merge_end_col)
+    ws.row_dimensions[row].height = 22
+
+
 def _extract_sorunlu_from_cap_df(cap_df, costcenter, workcenter="Tümü"):
     
     if cap_df is None or cap_df.empty or "STAT" not in cap_df.columns:
@@ -641,7 +734,7 @@ def _extract_sorunlu_from_cap_df(cap_df, costcenter, workcenter="Tümü"):
                     "Workcenter": workcenter,
                     "Satır Tipi": stat_str,
                     "Hafta/Ay": col,
-                    "Değer": round(num, 1) if isinstance(num, float) else num,
+                    "Değer": int(round(float(num), 0)),
                 })
     return out
 
@@ -661,11 +754,204 @@ def _extract_kumulatif_row_from_cap_df(cap_df, costcenter, workcenter="Tümü"):
             val = row.get(col)
             num = _parse_cell_to_float(val)
             if num is not None:
-                rec[col] = round(num, 1)
+                rec[col] = int(round(num, 0))
             else:
                 rec[col] = val
         return rec
     return None
+
+
+def _build_cumulative_ratio_from_cap_df(cap_df):
+    """
+    Kapasite Süresi tablosundan (STAT satırları) kümülatif ihtiyaç/kapasite ve oran üretir.
+    Oran = kümülatif_ihtiyaç / kümülatif_toplam_kapasite * 100
+    """
+    if cap_df is None or cap_df.empty or "STAT" not in cap_df.columns:
+        return None, None, None, None
+
+    week_cols = [c for c in cap_df.columns if c != "STAT" and _is_date_col(c) and str(c).strip() != "0"]
+    if not week_cols:
+        return None, None, None, None
+
+    row_need = None
+    row_total = None
+    for _, r in cap_df.iterrows():
+        stat = str(r.get("STAT") or "").strip()
+        if stat == "Kapasite İhtiyacı":
+            row_need = r
+        elif stat == "Toplam Kapasite":
+            row_total = r
+
+    if row_need is None or row_total is None:
+        return None, None, None, None
+
+    cum_need = []
+    cum_total = []
+    cum_ratio = []
+    running_need = 0.0
+    running_total = 0.0
+    for col in week_cols:
+        n_need = _parse_cell_to_float(row_need.get(col))
+        n_total = _parse_cell_to_float(row_total.get(col))
+        running_need += (n_need if n_need is not None else 0.0)
+        running_total += (n_total if n_total is not None else 0.0)
+        cum_need.append(running_need)
+        cum_total.append(running_total)
+        cum_ratio.append((running_need / running_total * 100.0) if running_total else None)
+
+    return week_cols, cum_need, cum_total, cum_ratio
+
+
+def _apply_rect_outer_border(ws, r1, r2, c1, c2, outer_side):
+    """Dikdörtgenin dış kenarına kalın çizgi; iç kenarları mümkün olduğunca korur."""
+    from openpyxl.styles import Border
+
+    for r in range(r1, r2 + 1):
+        for cc in range(c1, c2 + 1):
+            cell = ws.cell(row=r, column=cc)
+            prev = cell.border
+            cell.border = Border(
+                left=outer_side if cc == c1 else prev.left,
+                right=outer_side if cc == c2 else prev.right,
+                top=outer_side if r == r1 else prev.top,
+                bottom=outer_side if r == r2 else prev.bottom,
+            )
+
+
+def _write_cumulative_mini_table(
+    ws,
+    header_row,
+    cap_df,
+    s,
+    title_text,
+    merge_end_col=3,
+    right_edge_col=18,
+):
+    """
+    Hepsi/WC başlığının sağında: D sütunu gutter (ayırıcı), özet bloğu sağa yaslı tek renk kart.
+    Dönüş: Kapasite/Malzeme tablolarının yazılmaya başlanacağı satır.
+    """
+    from openpyxl.styles import Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    cols, cum_need, cum_total, cum_ratio = _build_cumulative_ratio_from_cap_df(cap_df)
+    if not cols:
+        return header_row + 2
+
+    gutter_col = merge_end_col + 1
+    n = len(cols)
+    min_label_col = gutter_col + 1
+    last_data_col = right_edge_col
+    label_col = last_data_col - n
+    if label_col <= gutter_col:
+        label_col = min_label_col
+        last_data_col = label_col + n
+    first_data_col = label_col + 1
+
+    g_letter = get_column_letter(gutter_col)
+    cur_dim = ws.column_dimensions.get(g_letter)
+    cur_w = cur_dim.width if cur_dim is not None and cur_dim.width is not None else 0.0
+    ws.column_dimensions[g_letter].width = max(2.2, cur_w)
+
+    start_row = header_row
+
+    def _outline0(r):
+        try:
+            ws.row_dimensions[r].outlineLevel = 0
+        except Exception:
+            pass
+
+    # Gutter hücreleri (C–D arası çizgi hissi)
+    last_block_row = start_row + 1 + 3
+    for gr in range(start_row, last_block_row + 1):
+        gcell = ws.cell(row=gr, column=gutter_col)
+        gcell.value = None
+        gcell.fill = PatternFill("solid", fgColor="FFFFFF")
+        gcell.border = s["mini_gutter_border"]
+
+    # Başlık
+    t_cell = ws.cell(row=start_row, column=label_col, value=title_text)
+    t_cell.font = s["mini_title_font"]
+    t_cell.fill = s["mini_title_fill"]
+    t_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    t_cell.border = s["mini_card_border"]
+    ws.merge_cells(start_row=start_row, start_column=label_col, end_row=start_row, end_column=last_data_col)
+    ws.row_dimensions[start_row].height = 20
+    _outline0(start_row)
+
+    # Ay başlıkları (düşük kontrast şerit)
+    h_row = start_row + 1
+    h_label = ws.cell(row=h_row, column=label_col, value="Dönem")
+    h_label.font = s["mini_hdr_font"]
+    h_label.fill = s["mini_hdr_fill"]
+    h_label.alignment = Alignment(horizontal="center", vertical="center")
+    h_label.border = s["mini_hdr_border"]
+    for i, c in enumerate(cols):
+        hc = ws.cell(row=h_row, column=first_data_col + i, value=str(c))
+        hc.font = s["mini_hdr_font"]
+        hc.fill = s["mini_hdr_fill"]
+        hc.alignment = Alignment(horizontal="center", vertical="center")
+        hc.border = s["mini_hdr_border"]
+    ws.row_dimensions[h_row].height = 19
+    _outline0(h_row)
+
+    rows_def = [
+        ("Küm. Kapasite İhtiyacı", cum_need, False),
+        ("Küm. Toplam Kapasite", cum_total, False),
+        ("Küm. Oran (%)", cum_ratio, True),
+    ]
+    cur = h_row + 1
+    for label, values, is_ratio in rows_def:
+        lc = ws.cell(row=cur, column=label_col, value=label)
+        if is_ratio:
+            lc.font = s["mini_ratio_row_label_font"]
+            lc.fill = s["mini_ratio_row_fill"]
+        else:
+            lc.font = s["mini_label_font"]
+            lc.fill = s["mini_card_fill"]
+        lc.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        lc.border = s["data_border"]
+        for i, v in enumerate(values):
+            cc = ws.cell(row=cur, column=first_data_col + i)
+            cc.border = s["data_border"]
+            if v is None:
+                cc.value = None
+            elif is_ratio:
+                _rv = _parse_cell_to_float(v)
+                cc.value = None if _rv is None else f"%{int(round(_rv))}%"
+            else:
+                _nv = _parse_cell_to_float(v)
+                cc.value = _dash_like_capacity_excel_number(_nv)
+            cc.alignment = Alignment(horizontal="right", vertical="center")
+            if is_ratio:
+                last = i == len(values) - 1
+                if last:
+                    cc.fill = s["mini_ratio_last_cell_fill"]
+                    cc.font = s["mini_ratio_last_cell_font"]
+                else:
+                    cc.fill = s["mini_ratio_row_fill"]
+                    cc.font = s["mini_ratio_row_value_font"]
+            else:
+                cc.fill = s["mini_card_fill"]
+                cc.font = s["mini_data_font"]
+        ws.row_dimensions[cur].height = 17
+        _outline0(cur)
+        cur += 1
+
+    end_row = cur - 1
+    _apply_rect_outer_border(ws, start_row, end_row, label_col, last_data_col, s["mini_card_border_side"])
+
+    label_letter = get_column_letter(label_col)
+    ld = ws.column_dimensions.get(label_letter)
+    lw = ld.width if ld is not None and ld.width is not None else 0
+    ws.column_dimensions[label_letter].width = max(lw, 24.0) if lw else 24.0
+    for ccix in range(first_data_col, last_data_col + 1):
+        L = get_column_letter(ccix)
+        d = ws.column_dimensions.get(L)
+        w = d.width if d is not None and d.width is not None else 0
+        ws.column_dimensions[L].width = max(w, 10.0) if w else 10.0
+
+    return cur + 1
 
 
 def _write_kumulatif_table_to_sheet(ws, start_row, df, s):
@@ -687,7 +973,7 @@ def _write_kumulatif_table_to_sheet(ws, start_row, df, s):
     for row_idx, r in enumerate(df.to_dict("records")):
         for c_idx, col_name in enumerate(cols, start=1):
             val = r.get(col_name)
-            cell = ws.cell(row=row, column=c_idx, value=val)
+            cell = ws.cell(row=row, column=c_idx, value=_excel_safe_value(val))
             cell.border = s["data_border"]
             if col_name in ("Workcenter", "Costcenter"):
                 cell.font = s["data_font"]
@@ -697,7 +983,7 @@ def _write_kumulatif_table_to_sheet(ws, start_row, df, s):
                 cell.alignment = Alignment(horizontal="right", vertical="center")
                 num_val = _parse_cell_to_float(val)
                 if num_val is not None:
-                    cell.value = None if num_val == 0 else round(num_val, 1)
+                    cell.value = _dash_like_capacity_excel_number(num_val)
                 if num_val is not None and num_val < 0:
                     cell.fill = s["sorunlu_deger_fill"]
                     cell.font = s["sorunlu_deger_font"]
@@ -781,12 +1067,21 @@ def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=Fal
             if is_capacity_table and c_idx > 1:
                 num_val = _parse_cell_to_float(val)
                 if num_val is not None:
-                    write_val = round(num_val, 1)
-                    if num_val == 0:
-                        write_val = None
+                    write_val = _dash_like_capacity_excel_number(num_val)
+                else:
+                    write_val = val
             elif c_idx > 1:
-                write_val = _display_blank_if_zero(val)
-            cell = ws.cell(row=row, column=c_idx, value=write_val)
+                col_name = df.columns[c_idx - 1]
+                if _is_date_col(col_name):
+                    num_val = _parse_cell_to_float(val)
+                    write_val = (
+                        _dash_like_capacity_excel_number(num_val)
+                        if num_val is not None
+                        else None
+                    )
+                else:
+                    write_val = _display_blank_if_zero(val)
+            cell = ws.cell(row=row, column=c_idx, value=_excel_safe_value(write_val))
 
             # Temel stil
             if c_idx == 1:
@@ -1053,9 +1348,23 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
             section_index=0,
         )
         cc_section_rows[sheet_name]["Hepsi"] = row_hepsi
+        _merge_section_title_row(ws_cc, row_hepsi, s, end_col=3)
         cap_hepsi = _get_cap_cc_cached(cc)
         cap_hepsi = _add_cap_alignment_column(cap_hepsi)
         cap_hepsi = _apply_export_columns(cap_hepsi, hidden_columns, table_columns, table_name)
+        # Başlık satırının sağında: D gutter, özet kartı sağa yaslı; Kapasite bundan SONRA yazılır.
+        row_cc = _write_cumulative_mini_table(
+            ws_cc,
+            header_row=row_hepsi,
+            cap_df=cap_hepsi,
+            s=s,
+            title_text="Kümülatif doluluk özeti (Hepsi)",
+        )
+        detail_start = row_cc
+        _write_detail_block_anchor_row(
+            ws_cc, detail_start, "  Hepsi — Kapasite Süresi · Malzeme", s, merge_end_col=3
+        )
+        row_cc = detail_start + 1
         row_cc = _write_table_to_sheet(
             ws_cc, row_cc, cap_hepsi, s,
             title="    Kapasite Süresi",
@@ -1088,9 +1397,22 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
                 section_index=wc_idx + 1,
             )
             cc_section_rows[sheet_name][wc] = row_wc
+            _merge_section_title_row(ws_cc, row_wc, s, end_col=3)
             cap_wc = _get_cap_wc_cached(cc, wc)
             cap_wc = _add_cap_alignment_column(cap_wc)
             cap_wc = _apply_export_columns(cap_wc, hidden_columns, table_columns, table_name)
+            row_cc = _write_cumulative_mini_table(
+                ws_cc,
+                header_row=row_wc,
+                cap_df=cap_wc,
+                s=s,
+                title_text=f"Kümülatif doluluk özeti — {wc}",
+            )
+            detail_start = row_cc
+            _write_detail_block_anchor_row(
+                ws_cc, detail_start, f"  {wc} — Kapasite Süresi · Malzeme", s, merge_end_col=3
+            )
+            row_cc = detail_start + 1
             row_cc = _write_table_to_sheet(
                 ws_cc, row_cc, cap_wc, s,
                 title="    Kapasite Süresi",

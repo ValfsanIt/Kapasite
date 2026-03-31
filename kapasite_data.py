@@ -29,6 +29,21 @@ def _div_safe(df, start_col_index, divisor):
     df.loc[:, target_cols] = df.loc[:, target_cols].div(divisor)
 
 
+def _finalize_capacity_pivot_like_dash(cap_df, weeks):
+    """Dash'taki Kapasite Süresi STAT tablolarıyla aynı: dönem kolonları round(0) + nullable Int64."""
+    if cap_df is None or cap_df.empty or not weeks:
+        return cap_df
+    out = cap_df.copy()
+    for c in weeks:
+        if c not in out.columns:
+            continue
+        out[c] = pd.to_numeric(out[c], errors="coerce").round(0).astype("Int64")
+    return out
+
+
+def _id_columns_malzeme(df):
+    return {c for c in ("MATERIAL", "DRAWNUM", "MACHINE", "BASEQUAN", "MTUNIT", "CAPWORK", "STAND") if c in df.columns}
+
 
 def generate_weekly_columns():
     """Haftalık kolonlar (İhtiyaç/Sipariş). Verimlilik sadece yük tablosunda VLFVARDIYASURE'dan kolon olarak eklenir."""
@@ -196,10 +211,9 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         selected_units = selected_units or ["hours"]
         if "hours" in selected_units:
             _div_safe(sum_df, 1, 60)
-            sum_df = sum_df.round(1)
         elif "shifts" in selected_units:
             _div_safe(sum_df, 1, 510)
-            sum_df = sum_df.round(1)
+        sum_df = sum_df.round(0)
 
         sum_df["STAT"] = "Kapasite İhtiyacı"
         weeks = [c for c in kolon_list if c in sum_df.columns]
@@ -210,13 +224,11 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         if sum_df_cap_work.shape[1] > 0:
             if "hours" in selected_units:
                 _div_safe(sum_df_cap_work, 0, 60)
-                sum_df_cap_work = sum_df_cap_work.round(1)
             elif "shifts" in selected_units:
                 _div_safe(sum_df_cap_work, 0, 510)
-                sum_df_cap_work = sum_df_cap_work.round(1)
             else:
                 _to_numeric_slice(sum_df_cap_work, 0)
-                sum_df_cap_work = sum_df_cap_work.round(0)
+            sum_df_cap_work = sum_df_cap_work.round(0)
 
         toplam_row = {"STAT": "Toplam Kapasite"}
         toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
@@ -228,7 +240,7 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
                 fark_row[col] = round(
                     float(cap_df.loc[cap_df["STAT"] == "Toplam Kapasite", col].iloc[0])
                     - float(cap_df.loc[cap_df["STAT"] == "Kapasite İhtiyacı", col].iloc[0]),
-                    1 if "hours" in selected_units or "shifts" in selected_units else 0,
+                    0,
                 )
             except Exception:
                 fark_row[col] = 0
@@ -238,8 +250,10 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         cumsum = cap_df.loc[cap_df["STAT"] == "Kapasite Farkı", numeric_cols].cumsum(axis=1)
         cum_row = {"STAT": "Kümülatif Toplam"}
         cum_row.update(cumsum.iloc[0].to_dict())
-        cum_row = {k: (round(v, 1) if isinstance(v, (int, float)) else v) for k, v in cum_row.items()}
+        cum_row = {k: (round(v, 0) if isinstance(v, (int, float)) else v) for k, v in cum_row.items()}
         cap_df = pd.concat([cap_df, pd.DataFrame([cum_row])], ignore_index=True)
+
+        cap_df = cap_df.round(0)
 
         ui_row = cap_df[cap_df["STAT"] == "Kapasite İhtiyacı"].iloc[0]
         tk_row = cap_df[cap_df["STAT"] == "Toplam Kapasite"].iloc[0]
@@ -248,13 +262,14 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
             try:
                 tk = float(tk_row[col])
                 ui = float(ui_row[col])
-                doluluk_vals.append(round((ui / tk) * 100, 1) if tk != 0 else 0)
+                doluluk_vals.append(round((ui / tk) * 100, 0) if tk != 0 else 0)
             except Exception:
                 doluluk_vals.append(0)
         doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks)
         doluluk_df["STAT"] = "Doluluk Oranı(%)"
+        doluluk_df = doluluk_df.round(0)
         cap_df = pd.concat([cap_df, doluluk_df], ignore_index=True)
-        return cap_df
+        return _finalize_capacity_pivot_like_dash(cap_df, weeks)
     except Exception as e:
         print(f"kapasite_data build_capacity_table_for_cc hatası: {e}")
         return None
@@ -308,10 +323,9 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         selected_units = selected_units or ["hours"]
         if "hours" in selected_units:
             _div_safe(sum_df, 1, 60)
-            sum_df = sum_df.round(1)
         elif "shifts" in selected_units:
             _div_safe(sum_df, 1, 510)
-            sum_df = sum_df.round(1)
+        sum_df = sum_df.round(0)
 
         sum_df["STAT"] = "Kapasite İhtiyacı"
         weeks = [c for c in kolon_list if c in sum_df.columns]
@@ -322,13 +336,11 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         if sum_df_cap_work.shape[1] > 0:
             if "hours" in selected_units:
                 _div_safe(sum_df_cap_work, 0, 60)
-                sum_df_cap_work = sum_df_cap_work.round(1)
             elif "shifts" in selected_units:
                 _div_safe(sum_df_cap_work, 0, 510)
-                sum_df_cap_work = sum_df_cap_work.round(1)
             else:
                 _to_numeric_slice(sum_df_cap_work, 0)
-                sum_df_cap_work = sum_df_cap_work.round(0)
+            sum_df_cap_work = sum_df_cap_work.round(0)
 
         toplam_row = {"STAT": "Toplam Kapasite"}
         toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
@@ -340,7 +352,7 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
                 fark_row[col] = round(
                     float(cap_df.loc[cap_df["STAT"] == "Toplam Kapasite", col].iloc[0])
                     - float(cap_df.loc[cap_df["STAT"] == "Kapasite İhtiyacı", col].iloc[0]),
-                    1 if "hours" in selected_units or "shifts" in selected_units else 0,
+                    0,
                 )
             except Exception:
                 fark_row[col] = 0
@@ -350,8 +362,10 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         cumsum = cap_df.loc[cap_df["STAT"] == "Kapasite Farkı", numeric_cols].cumsum(axis=1)
         cum_row = {"STAT": "Kümülatif Toplam"}
         cum_row.update(cumsum.iloc[0].to_dict())
-        cum_row = {k: (round(v, 1) if isinstance(v, (int, float)) else v) for k, v in cum_row.items()}
+        cum_row = {k: (round(v, 0) if isinstance(v, (int, float)) else v) for k, v in cum_row.items()}
         cap_df = pd.concat([cap_df, pd.DataFrame([cum_row])], ignore_index=True)
+
+        cap_df = cap_df.round(0)
 
         ui_row = cap_df[cap_df["STAT"] == "Kapasite İhtiyacı"].iloc[0]
         tk_row = cap_df[cap_df["STAT"] == "Toplam Kapasite"].iloc[0]
@@ -360,13 +374,14 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
             try:
                 tk = float(tk_row[col])
                 ui = float(ui_row[col])
-                doluluk_vals.append(round((ui / tk) * 100, 1) if tk != 0 else 0)
+                doluluk_vals.append(round((ui / tk) * 100, 0) if tk != 0 else 0)
             except Exception:
                 doluluk_vals.append(0)
         doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks)
         doluluk_df["STAT"] = "Doluluk Oranı(%)"
+        doluluk_df = doluluk_df.round(0)
         cap_df = pd.concat([cap_df, doluluk_df], ignore_index=True)
-        return cap_df
+        return _finalize_capacity_pivot_like_dash(cap_df, weeks)
     except Exception as e:
         print(f"kapasite_data build_capacity_table_for_cc_workcenter hatası: {e}")
         return None
@@ -388,12 +403,10 @@ def build_workcenter_yuk_table_for_cc(ag_instance, table_name, costcenter, kolon
         df = df.round(0)
         if "hours" in (selected_units or []):
             _div_safe(df, 1, 60)
-            df = df.round(1)
         elif "shifts" in (selected_units or []):
             _div_safe(df, 1, 510)
-            df = df.round(1)
+        df = df.round(0)
 
-        
         verim_df = get_verimlilik_df(ag_instance)
         if verim_df is not None:
             df = df.merge(verim_df, left_on="CAPWORK", right_on="WORKCENTER", how="left")
@@ -402,6 +415,11 @@ def build_workcenter_yuk_table_for_cc(ag_instance, table_name, costcenter, kolon
         else:
             df["Verimlilik"] = None
 
+        wc_numeric_cols = [c for c in df.columns if c != "CAPWORK"]
+        if wc_numeric_cols:
+            df[wc_numeric_cols] = (
+                df[wc_numeric_cols].apply(pd.to_numeric, errors="coerce").round(0).astype("Int64")
+            )
         return df
     except Exception as e:
         print(f"kapasite_data build_workcenter_yuk_table_for_cc hatası: {e}")
@@ -453,10 +471,14 @@ def build_malzeme_table_for_cc(ag_instance, table_name, costcenter, kolon_sum_st
         pass
     if "hours" in (selected_units or []):
         _div_safe(df, num_id_cols, 60)
-        df = df.round(1)
     elif "shifts" in (selected_units or []):
         _div_safe(df, num_id_cols, 510)
-        df = df.round(1)
+    df = df.round(0)
+    num_cols = [c for c in df.columns if c not in _id_columns_malzeme(df)]
+    if num_cols:
+        df[num_cols] = (
+            df[num_cols].apply(pd.to_numeric, errors="coerce").round(0).astype("Int64")
+        )
     return df
 
 
@@ -505,8 +527,12 @@ def build_malzeme_table_for_cc_workcenter(ag_instance, table_name, costcenter, w
         pass
     if "hours" in (selected_units or []):
         _div_safe(df, num_id_cols, 60)
-        df = df.round(1)
     elif "shifts" in (selected_units or []):
         _div_safe(df, num_id_cols, 510)
-        df = df.round(1)
+    df = df.round(0)
+    num_cols = [c for c in df.columns if c not in _id_columns_malzeme(df)]
+    if num_cols:
+        df[num_cols] = (
+            df[num_cols].apply(pd.to_numeric, errors="coerce").round(0).astype("Int64")
+        )
     return df

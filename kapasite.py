@@ -205,42 +205,46 @@ def run_query_safe(sql, retries=3, backoff=0.5):
 HAS_ACCORDION_HEADER = hasattr(dbc, "AccordionHeader") and hasattr(dbc, "AccordionBody")
 
 
-def generate_monthly_columns():
-    """Aylık kolonlar (Öngörü). format1/format4 kapasite için; verimlilik sadece yük tablosunda kolon olarak."""
+def generate_monthly_columns(selected_year=None):
+    """Aylık kolonlar (Öngörü).
+    format1/format4 kapasite için; verimlilik sadece yük tablosunda kolon olarak.
+
+    selected_year verilirse sadece seçilen yıla(lar)a ait ayları üretir.
+    selected_year None ise mevcut yıl + bir sonraki yıl üretilir.
+    """
     today = datetime.today()
 
-    # Mevcut yıl ve bir sonraki yıl
-    start_year = today.year
-    end_year = start_year + 1
+    # Normalizasyon: None -> [today, today+1], tek -> [tek], liste -> [liste]
+    if selected_year is None or selected_year == []:
+        years_to_generate = [today.year, today.year + 1]
+    elif isinstance(selected_year, (str, int)):
+        years_to_generate = [int(selected_year)]
+    elif isinstance(selected_year, list):
+        years_to_generate = [int(y) for y in selected_year if y is not None and str(y).strip()]
+    else:
+        years_to_generate = [int(selected_year)]
+
+    # Deterministik sıra
+    years_to_generate = sorted(set(years_to_generate))
 
     # Format listeleri
     format1, format2, format3, format4 = [], [], [], []
 
-    # Başlangıç ve bitiş tarihlerini tanımla
-    current_date = datetime(start_year, 1, 1)
-    end_date = datetime(end_year, 12, 1)
+    for year in years_to_generate:
+        for month in range(1, 13):
+            month_str = str(month).zfill(2)
+            ym = f"{year}-{month_str}"
 
-    while current_date <= end_date:
-        year = current_date.year
-        month = str(current_date.month).zfill(2)
-        ym = f"{year}-{month}"
-
-        format1.append(f"SUM(B.[{ym}]) AS [{ym}]")
-        format2.append(f"SUM([{ym}]) AS [{ym}], SUM([{ym}A]) AS [{ym}A]")
-        format3.append(f"{ym}")
-        format3.append(f"{ym}A")
-        format4.append(
-            f"CAST(CEILING((CAST(SUM(A.[{ym}]) AS DECIMAL(18, 3))/"
-            f"CASE WHEN CAST(SUM(B.[{ym}]) AS DECIMAL(18, 3)) = 0 "
-            f"THEN 1 ELSE CAST(SUM(B.[{ym}]) AS DECIMAL(18, 3)) "
-            f"END)*100) AS int) AS [{ym}]"
-        )
-
-        # Bir sonraki aya geç
-        next_month = current_date.month + 1
-        next_year = current_date.year + (1 if next_month > 12 else 0)
-        next_month = 1 if next_month > 12 else next_month
-        current_date = datetime(next_year, next_month, 1)
+            format1.append(f"SUM(B.[{ym}]) AS [{ym}]")
+            format2.append(f"SUM([{ym}]) AS [{ym}], SUM([{ym}A]) AS [{ym}A]")
+            format3.append(f"{ym}")
+            format3.append(f"{ym}A")
+            format4.append(
+                f"CAST(CEILING((CAST(SUM(A.[{ym}]) AS DECIMAL(18, 3))/"
+                f"CASE WHEN CAST(SUM(B.[{ym}]) AS DECIMAL(18, 3)) = 0 "
+                f"THEN 1 ELSE CAST(SUM(B.[{ym}]) AS DECIMAL(18, 3)) "
+                f"END)*100) AS int) AS [{ym}]"
+            )
 
     return {
         'format1': ", ".join(format1),
@@ -424,12 +428,27 @@ def _clean_df_column_names(df):
 
 def _display_col_name(col_id, zero_first_state):
     """Dashboard'da ZIP görünümüyle uyum için ilk tarih kolonu başlığını '0' göster."""
-    if zero_first_state["available"] and zero_first_state["first_done"] is False:
-        c = str(col_id)
-        if re.match(r"^\d{4}-\d{2}$", c):
-            zero_first_state["first_done"] = True
-            return "0"
-    return col_id if (col_id and str(col_id).strip()) else "\u00a0"
+    if not col_id:
+        return "\u00a0"
+
+    c = str(col_id).strip()
+    if not c:
+        return "\u00a0"
+
+    # Örn: "2026-03" ve "2026-03A" için aynı base ayı yakalayalım.
+    if zero_first_state.get("available"):
+        m = re.match(r"^(?P<base>\d{4}-\d{2})(?P<a>A)?$", c)
+        if m:
+            base = m.group("base")
+            # İlk karşılaştığımız base ayı için hem A'lı hem A'sız kolona "0" yaz.
+            if not zero_first_state.get("first_done", False):
+                zero_first_state["first_date_base"] = base
+                zero_first_state["first_done"] = True
+
+            if zero_first_state.get("first_date_base") == base:
+                return "0"
+
+    return col_id
 
 
 def get_table_columns(table_name):
@@ -514,6 +533,54 @@ _HEADER_STYLE       = {'fontWeight': 'bold', 'minWidth': '90px',
                         'minHeight': '44px', 'padding': '10px 8px',
                         'overflow': 'visible', 'lineHeight': '1.3', 'verticalAlign': 'middle'}
 
+# Sabit (sol) kolonlar — canlı teal (CSS + zebra override ile uyumlu)
+_FIXED_PIN_COL_BG = '#14b8a6'
+_FIXED_PIN_COL_FG = '#ffffff'
+_FIXED_PIN_HEADER_BG = '#0d9488'
+
+
+def _fixed_pin_cell_rule(column_id, min_w, max_w):
+    return {
+        'if': {'column_id': column_id},
+        'backgroundColor': _FIXED_PIN_COL_BG,
+        'color': _FIXED_PIN_COL_FG,
+        'fontWeight': '900',
+        'fontSize': '13px',
+        'minWidth': min_w,
+        'maxWidth': max_w,
+        'textAlign': 'left',
+        'paddingLeft': '14px',
+        'overflow': 'visible',
+    }
+
+
+def _fixed_pin_header_rule(column_id, min_w, max_w):
+    return {
+        'if': {'column_id': column_id},
+        'backgroundColor': _FIXED_PIN_HEADER_BG,
+        'color': '#ffffff',
+        'fontWeight': '900',
+        'fontSize': '14px',
+        'minWidth': min_w,
+        'maxWidth': max_w,
+        'textAlign': 'left',
+        'paddingLeft': '14px',
+    }
+
+
+def _fixed_pin_style_data_overrides(column_ids):
+    """Zebra (odd/even) kurallarından sonra eklenmeli; sabit kolonları soluk bırakmaz."""
+    return [
+        {
+            'if': {'column_id': cid},
+            'backgroundColor': _FIXED_PIN_COL_BG,
+            'color': _FIXED_PIN_COL_FG,
+            'fontWeight': '900',
+        }
+        for cid in column_ids
+    ]
+
+
 def _section_badge(icon, title, subtitle=""):
     
     return html.Div([
@@ -571,6 +638,20 @@ def _fullscreen_panel(panel_id, children, close_button_id=None):
     ], id=panel_id, className="kap-fullscreen-panel")
 
 
+def _selection_summary_box(scope_id, total_id, avg_id):
+    return html.Div(
+        className="kap-selection-info",
+        style={"marginTop": "10px", "padding": "8px 12px", "border": "1px solid rgba(71,85,105,.25)", "borderRadius": "10px"},
+        children=[
+            html.Div(id=scope_id, style={"fontWeight": "800", "marginBottom": "4px"}),
+            html.Span("Toplam: ", style={"opacity": 0.85}),
+            html.Span(id=total_id, style={"fontWeight": "700", "marginRight": "14px"}),
+            html.Span("Ortalama: ", style={"opacity": 0.85}),
+            html.Span(id=avg_id, style={"fontWeight": "700"}),
+        ],
+    )
+
+
 
 
 
@@ -595,11 +676,11 @@ layout = dbc.Container([
     dcc.Store(id='capwc-last-click', data=None),
     dcc.Store(id='material-last-click', data=None),
     # ── Toggle durumu store'ları (A kolonlarını göster/gizle) ──────
-    dcc.Store(id='costcenter-col-toggle-state', data=True),       # True = A kolonları görünür
-    dcc.Store(id='workcenter-col-toggle-state', data=True),
-    dcc.Store(id='cap-costcenter-col-toggle-state', data=True),
-    dcc.Store(id='cap-workcenter-col-toggle-state', data=True),
-    dcc.Store(id='material-col-toggle-state', data=True),
+    dcc.Store(id='costcenter-col-toggle-state', data=False),       # False = başlangıçta A kolonları gizli
+    dcc.Store(id='workcenter-col-toggle-state', data=False),
+    dcc.Store(id='cap-costcenter-col-toggle-state', data=False),
+    dcc.Store(id='cap-workcenter-col-toggle-state', data=False),
+    dcc.Store(id='material-col-toggle-state', data=False),
 
     # ── PAGE HEADER ────────────────────────────────────────────────
     html.Div([
@@ -663,7 +744,7 @@ layout = dbc.Container([
                         dcc.Dropdown(
                             id='year-selector',
                             options=[],
-                            value=[],
+                            value=None,
                             multi=True,
                             style={'display': 'none'},
                             className="kap-dropdown kap-dropdown-year"
@@ -781,23 +862,27 @@ layout = dbc.Container([
                             style_header={**_HEADER_STYLE, 'minWidth': '110px', 'maxWidth': '160px'},
                             style_data_conditional=[
                                 {'if': {'row_index': 'odd'}, 'backgroundColor': '#eef4ff'},
-                            ],
+                            ] + _fixed_pin_style_data_overrides(['STAND']),
                             fixed_rows={'headers': True},
                             fixed_columns={'headers': True, 'data': 1},
-                            row_selectable=False,
+                            row_selectable="multi",
+                            column_selectable="multi",
                             cell_selectable=True,
                             selected_rows=[],
                             selected_cells=[],
                             include_headers_on_copy_paste=True,
                             active_cell=None,
                             style_cell_conditional=[
-                                {'if': {'column_id': 'STAND'},
-                                 'backgroundColor': '#475569', 'color': '#ffffff',
-                                 'fontWeight': '900', 'fontSize': '13px',
-                                 'minWidth': '150px', 'maxWidth': '220px',
-                                 'textAlign': 'left', 'paddingLeft': '14px',
-                                 'overflow': 'visible'},
+                                _fixed_pin_cell_rule('STAND', '150px', '220px'),
                             ],
+                            style_header_conditional=[
+                                _fixed_pin_header_rule('STAND', '150px', '220px'),
+                            ],
+                        ),
+                        _selection_summary_box(
+                            "selection-agg-scope-costcenter",
+                            "selection-agg-total-costcenter",
+                            "selection-agg-avg-costcenter",
                         ),
                         dcc.Store(id='cc_yuk_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
@@ -828,22 +913,27 @@ layout = dbc.Container([
                             style_header={**_HEADER_STYLE, 'minWidth': '110px', 'maxWidth': '160px'},
                             style_data_conditional=[
                                 {'if': {'row_index': 'odd'}, 'backgroundColor': '#eef4ff'},
-                            ],
+                            ] + _fixed_pin_style_data_overrides(['STAT']),
                             fixed_rows={'headers': True},
                             fixed_columns={'headers': True, 'data': 1},
                             style_cell_conditional=[
-                                {'if': {'column_id': 'STAT'},
-                                 'backgroundColor': '#475569', 'color': '#ffffff',
-                                 'fontWeight': '900', 'fontSize': '13px',
-                                 'minWidth': '180px', 'maxWidth': '240px',
-                                 'textAlign': 'left', 'paddingLeft': '14px',
-                                 'overflow': 'visible'},
+                                _fixed_pin_cell_rule('STAT', '180px', '240px'),
                             ],
+                            style_header_conditional=[
+                                _fixed_pin_header_rule('STAT', '180px', '240px'),
+                            ],
+                            row_selectable="multi",
+                            column_selectable="multi",
                             cell_selectable=True,
                             selected_rows=[],
                             selected_cells=[],
                             include_headers_on_copy_paste=True,
                             active_cell=None,
+                        ),
+                        _selection_summary_box(
+                            "selection-agg-scope-capcost",
+                            "selection-agg-total-capcost",
+                            "selection-agg-avg-capcost",
                         ),
                         dcc.Store(id='cc_kap_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
@@ -905,21 +995,34 @@ layout = dbc.Container([
                         _section_badge("📈", "Workcenter Grafik", "Makine bazlı kapasite yük oranı"),
                         html.Div(id="selection-info-workcenter-grafik", className="kap-selection-info", style={"marginBottom": "8px"}),
                         html.Div([
-                            dcc.Dropdown(
-                                id='workcenter-dropdown',
-                                options=[],
-                                value='Hepsi',
-                                placeholder="Workcenter seçiniz...",
-                                className="kap-dropdown",
-                                style={'flex': '1'},
-                            ),
-                            dcc.Dropdown(
-                                id='workcenter-capacity-dropdown',
-                                options=[],
-                                value='Kapasite Grubu',
-                                className="kap-dropdown",
-                                style={'flex': '1'},
-                            ),
+                            # 1) Kapasite Grubu
+                            html.Div([
+                                html.Label(
+                                    [html.Span("⬛", style={'marginRight': '6px'}), "Kapasite Grubu"],
+                                    className="kap-label kap-label-control",
+                                ),
+                                dcc.Dropdown(
+                                    id='workcenter-capacity-dropdown',
+                                    options=[],
+                                    value='Kapasite Grubu',
+                                    className="kap-dropdown",
+                                ),
+                            ], style={'flex': '1', 'minWidth': '0'}),
+
+                            # 2) İş Merkezi
+                            html.Div([
+                                html.Label(
+                                    [html.Span("🏭", style={'marginRight': '6px'}), "İş merkezi"],
+                                    className="kap-label kap-label-control",
+                                ),
+                                dcc.Dropdown(
+                                    id='workcenter-dropdown',
+                                    options=[],
+                                    value='Hepsi',
+                                    placeholder="İş merkezi seçiniz...",
+                                    className="kap-dropdown",
+                                ),
+                            ], style={'flex': '1', 'minWidth': '0'}),
                         ], style={'display': 'flex', 'gap': '12px', 'marginBottom': '14px'}),
                         html.Div([
                             dcc.Graph(
@@ -956,22 +1059,27 @@ layout = dbc.Container([
                             style_header={**_HEADER_STYLE, 'minWidth': '110px', 'maxWidth': '180px'},
                             style_data_conditional=[
                                 {'if': {'row_index': 'odd'}, 'backgroundColor': '#eef4ff'},
-                            ],
+                            ] + _fixed_pin_style_data_overrides(['CAPWORK']),
                             fixed_rows={'headers': True},
                             fixed_columns={'headers': True, 'data': 1},
                             style_cell_conditional=[
-                                {'if': {'column_id': 'CAPWORK'},
-                                 'backgroundColor': '#475569', 'color': '#ffffff',
-                                 'fontWeight': '900', 'fontSize': '13px',
-                                 'minWidth': '150px', 'maxWidth': '220px',
-                                 'textAlign': 'left', 'paddingLeft': '14px',
-                                 'overflow': 'visible'},
+                                _fixed_pin_cell_rule('CAPWORK', '150px', '220px'),
                             ],
+                            style_header_conditional=[
+                                _fixed_pin_header_rule('CAPWORK', '150px', '220px'),
+                            ],
+                            row_selectable="multi",
+                            column_selectable="multi",
                             cell_selectable=True,
                             selected_rows=[],
                             selected_cells=[],
                             include_headers_on_copy_paste=True,
                             active_cell=None,
+                        ),
+                        _selection_summary_box(
+                            "selection-agg-scope-workcenter",
+                            "selection-agg-total-workcenter",
+                            "selection-agg-avg-workcenter",
                         ),
                         dcc.Store(id='wc_yuk_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
@@ -1003,22 +1111,27 @@ layout = dbc.Container([
                             style_header={**_HEADER_STYLE, 'minWidth': '110px', 'maxWidth': '160px'},
                             style_data_conditional=[
                                 {'if': {'row_index': 'odd'}, 'backgroundColor': '#eef4ff'},
-                            ],
+                            ] + _fixed_pin_style_data_overrides(['STAT']),
                             fixed_rows={'headers': True},
                             fixed_columns={'headers': True, 'data': 1},
                             style_cell_conditional=[
-                                {'if': {'column_id': 'STAT'},
-                                 'backgroundColor': '#475569', 'color': '#ffffff',
-                                 'fontWeight': '900', 'fontSize': '13px',
-                                 'minWidth': '180px', 'maxWidth': '240px',
-                                 'textAlign': 'left', 'paddingLeft': '14px',
-                                 'overflow': 'visible'},
+                                _fixed_pin_cell_rule('STAT', '180px', '240px'),
                             ],
+                            style_header_conditional=[
+                                _fixed_pin_header_rule('STAT', '180px', '240px'),
+                            ],
+                            row_selectable="multi",
+                            column_selectable="multi",
                             cell_selectable=True,
                             selected_rows=[],
                             selected_cells=[],
                             include_headers_on_copy_paste=True,
                             active_cell=None,
+                        ),
+                        _selection_summary_box(
+                            "selection-agg-scope-capwork",
+                            "selection-agg-total-capwork",
+                            "selection-agg-avg-capwork",
                         ),
                         dcc.Store(id='wc_kap_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
@@ -1050,27 +1163,29 @@ layout = dbc.Container([
                             style_header={**_HEADER_STYLE, 'minWidth': '110px', 'maxWidth': '160px'},
                             style_data_conditional=[
                                 {'if': {'row_index': 'odd'}, 'backgroundColor': '#eef4ff'},
-                            ],
+                            ] + _fixed_pin_style_data_overrides(['MATERIAL', 'DRAWNUM']),
                             fixed_rows={'headers': True},
-                            fixed_columns={'headers': True, 'data': 1},
+                            fixed_columns={'headers': True, 'data': 2},
                             style_cell_conditional=[
-                                {'if': {'column_id': 'MATERIAL'},
-                                 'backgroundColor': '#475569', 'color': '#ffffff',
-                                 'fontWeight': '900', 'fontSize': '13px',
-                                 'minWidth': '150px', 'maxWidth': '220px',
-                                 'textAlign': 'left', 'paddingLeft': '14px',
-                                 'overflow': 'visible'},
-                                {'if': {'column_id': 'MALZEME'},
-                                 'backgroundColor': '#475569', 'color': '#ffffff',
-                                 'fontWeight': '900', 'fontSize': '13px',
-                                 'minWidth': '150px', 'maxWidth': '220px',
-                                 'textAlign': 'left', 'paddingLeft': '14px'},
+                                _fixed_pin_cell_rule('MATERIAL', '150px', '220px'),
+                                _fixed_pin_cell_rule('DRAWNUM', '150px', '220px'),
                             ],
+                            style_header_conditional=[
+                                _fixed_pin_header_rule('MATERIAL', '150px', '220px'),
+                                _fixed_pin_header_rule('DRAWNUM', '150px', '220px'),
+                            ],
+                            row_selectable="multi",
+                            column_selectable="multi",
                             cell_selectable=True,
                             selected_rows=[],
                             selected_cells=[],
                             include_headers_on_copy_paste=True,
                             active_cell=None,
+                        ),
+                        _selection_summary_box(
+                            "selection-agg-scope-material",
+                            "selection-agg-total-material",
+                            "selection-agg-avg-material",
                         ),
                         dcc.Store(id='material_multi_sel_flag', data=False),
                     ], className="kap-tab-panel-inner", style={'width': '100%', 'height': '100%', 'display': 'flex', 'flexDirection': 'column'}),
@@ -1090,7 +1205,6 @@ layout = dbc.Container([
             }),
         ]
     ),
-
 ], fluid=True, className="kap-page-container")
 
 
@@ -1109,9 +1223,10 @@ layout = dbc.Container([
      Input("interval-component", "n_intervals"),
      Input('unit-checkbox', 'value'),
      Input('data-type-dropdown', 'value'),
+     Input('year-selector', 'value'),
     State("table_name", "data")
 )
-def selected_table(n,selected_units,selected_type,current_table_name):
+def selected_table(n,selected_units,selected_type,selected_year,current_table_name):
     
     trigger_id = ctx.triggered_id if hasattr(ctx, "triggered_id") else None
 
@@ -1141,7 +1256,8 @@ def selected_table(n,selected_units,selected_type,current_table_name):
     elif 'Öngörü Miktarı' in selected_type:
         table_name = 'VLFCAPFINALOY'
         capacity_table_name='VLFVARDIYASUREAY'
-        monthly_columns = generate_monthly_columns()
+        # year-selector sadece Öngörü'de görünür; burada seçili yılı baz al.
+        monthly_columns = generate_monthly_columns(selected_year=selected_year)
 
         format1_sumb = monthly_columns['format1']
         format2_sum = monthly_columns['format2']
@@ -1205,9 +1321,12 @@ _VERI_TIPI_HINT_HIDDEN = {'display': 'none'}
     Output('veri-tipi-load-hide', 'disabled'),
     Output('veri-tipi-load-hide', 'n_intervals'),
     Input('data-type-dropdown', 'value'),
+    Input('costcenter-dropdown', 'value'),
+    Input('workcenter-capacity-dropdown', 'value'),
+    Input('workcenter-dropdown', 'value'),
     prevent_initial_call=True,
 )
-def veri_tipi_show_loading_hint(_value):
+def veri_tipi_show_loading_hint(_value, _cc, _capgrp, _wc):
     return _VERI_TIPI_HINT_VISIBLE, False, 0
 
 
@@ -1365,6 +1484,311 @@ def _clear_multi_cell_highlight_on_next_click(
     )
 
 
+def _try_float(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        # bool'i sayısal kabul etmeyelim
+        if isinstance(v, bool):
+            return None
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if s == "":
+            return None
+        # Binlik ayırıcıları temizle: 1.234,56 -> 1234.56
+        s2 = s.replace(".", "").replace(",", ".")
+        try:
+            return float(s2)
+        except Exception:
+            return None
+    return None
+
+
+def _format_num(v):
+    if v is None:
+        return "—"
+    try:
+        # Excel mantığı: çok küçük hatalar için yuvarla
+        if isinstance(v, float):
+            return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"{v:,}".replace(",", ".")
+    except Exception:
+        return str(v)
+
+
+@app.callback(
+    Output("selection-agg-scope-costcenter", "children"),
+    Output("selection-agg-total-costcenter", "children"),
+    Output("selection-agg-avg-costcenter", "children"),
+    Output("selection-agg-scope-capcost", "children"),
+    Output("selection-agg-total-capcost", "children"),
+    Output("selection-agg-avg-capcost", "children"),
+    Output("selection-agg-scope-workcenter", "children"),
+    Output("selection-agg-total-workcenter", "children"),
+    Output("selection-agg-avg-workcenter", "children"),
+    Output("selection-agg-scope-capwork", "children"),
+    Output("selection-agg-total-capwork", "children"),
+    Output("selection-agg-avg-capwork", "children"),
+    Output("selection-agg-scope-material", "children"),
+    Output("selection-agg-total-material", "children"),
+    Output("selection-agg-avg-material", "children"),
+    Input("costcenter_table", "selected_cells"),
+    Input("costcenter_table", "active_cell"),
+    Input("costcenter_table", "selected_rows"),
+    Input("costcenter_table", "selected_columns"),
+    Input("capasity_table_costcenter", "selected_cells"),
+    Input("capasity_table_costcenter", "active_cell"),
+    Input("capasity_table_costcenter", "selected_rows"),
+    Input("capasity_table_costcenter", "selected_columns"),
+    Input("workcenter_table", "selected_cells"),
+    Input("workcenter_table", "active_cell"),
+    Input("workcenter_table", "selected_rows"),
+    Input("workcenter_table", "selected_columns"),
+    Input("capasity_table_workcenter", "selected_cells"),
+    Input("capasity_table_workcenter", "active_cell"),
+    Input("capasity_table_workcenter", "selected_rows"),
+    Input("capasity_table_workcenter", "selected_columns"),
+    Input("material_table", "selected_cells"),
+    Input("material_table", "active_cell"),
+    Input("material_table", "selected_rows"),
+    Input("material_table", "selected_columns"),
+    State("costcenter_table", "data"),
+    State("costcenter_table", "columns"),
+    State("capasity_table_costcenter", "data"),
+    State("capasity_table_costcenter", "columns"),
+    State("workcenter_table", "data"),
+    State("workcenter_table", "columns"),
+    State("capasity_table_workcenter", "data"),
+    State("capasity_table_workcenter", "columns"),
+    State("material_table", "data"),
+    State("material_table", "columns"),
+)
+def update_selection_summary(
+    cc_sel, cc_active,
+    cc_sel_rows, cc_sel_cols,
+    cc_kap_sel, cc_kap_active,
+    cc_kap_sel_rows, cc_kap_sel_cols,
+    wc_sel, wc_active,
+    wc_sel_rows, wc_sel_cols,
+    wc_kap_sel, wc_kap_active,
+    wc_kap_sel_rows, wc_kap_sel_cols,
+    mat_sel, mat_active,
+    mat_sel_rows, mat_sel_cols,
+    cc_data, cc_columns,
+    cc_kap_data, cc_kap_columns,
+    wc_data, wc_columns,
+    wc_kap_data, wc_kap_columns,
+    mat_data, mat_columns,
+):
+    """
+    Excel mantığı:
+    - selected_cells varken: o hücrelerin toplam/ortalaması
+    - selected_cells aynı satırda ve o satırdaki tüm kolonlar seçiliyse: tam satırın toplam/ortalaması
+    - selected_cells aynı sütunda ve o sütundaki tüm satırlar seçiliyse: tam sütunun toplam/ortalaması
+    - selected_cells yok ama active_cell varsa: aktif hücre
+    """
+    def _normalize_active(active, cols):
+        if not active or not isinstance(active, dict):
+            return None
+        if active.get("column_id") is not None:
+            return active
+        col_idx = active.get("column")
+        if col_idx is None or not cols:
+            return active
+        try:
+            idx = int(col_idx)
+            if 0 <= idx < len(cols):
+                cid = cols[idx].get("id")
+                if cid is not None:
+                    return {**active, "column_id": cid}
+        except Exception:
+            pass
+        return active
+
+    def _cells_from_sel_or_active(label, sel, active, sel_rows, sel_cols, data, cols):
+        if data and cols and sel_rows:
+            values = []
+            col_ids_local = [c.get("id") for c in cols if c and c.get("id") is not None]
+            for r in sel_rows:
+                if isinstance(r, int) and 0 <= r < len(data):
+                    for cid in col_ids_local:
+                        values.append(data[r].get(cid))
+            return label, values, f"{label} (Satır)"
+        if data and cols and sel_cols:
+            values = []
+            for cid in sel_cols:
+                for r in range(len(data)):
+                    values.append(data[r].get(cid))
+            return label, values, f"{label} (Sütun)"
+        if sel and len(sel) > 0:
+            return label, sel, data, cols
+        a = _normalize_active(active, cols or [])
+        if a:
+            return label, [a], data, cols
+        return None
+
+    table_map = [
+        ("costcenter_table", "Yük (Costcenter)", cc_sel, cc_active, cc_sel_rows, cc_sel_cols, cc_data, cc_columns),
+        ("capasity_table_costcenter", "Kapasite Süresi (Costcenter)", cc_kap_sel, cc_kap_active, cc_kap_sel_rows, cc_kap_sel_cols, cc_kap_data, cc_kap_columns),
+        ("workcenter_table", "Yük (Workcenter)", wc_sel, wc_active, wc_sel_rows, wc_sel_cols, wc_data, wc_columns),
+        ("capasity_table_workcenter", "Kapasite Süresi (Workcenter)", wc_kap_sel, wc_kap_active, wc_kap_sel_rows, wc_kap_sel_cols, wc_kap_data, wc_kap_columns),
+        ("material_table", "Malzeme Yük", mat_sel, mat_active, mat_sel_rows, mat_sel_cols, mat_data, mat_columns),
+    ]
+
+    chosen = None
+    trig = ctx.triggered_id if hasattr(ctx, "triggered_id") else None
+    trig_s = str(trig) if trig is not None else ""
+    if trig:
+        for tid, lab, sel, act, sel_rows, sel_cols, dat, coldef in table_map:
+            # Dash: triggered_id çoğu sürümde bileşen id'si (örn. costcenter_table), bazen prop ile birlikte
+            if trig_s == tid or trig_s.startswith(f"{tid}."):
+                chosen = _cells_from_sel_or_active(lab, sel, act, sel_rows, sel_cols, dat, coldef)
+                break
+
+    if not chosen:
+        for _tid, lab, sel, act, sel_rows, sel_cols, dat, coldef in table_map:
+            c = _cells_from_sel_or_active(lab, sel, act, sel_rows, sel_cols, dat, coldef)
+            if c:
+                chosen = c
+                break
+
+    if not chosen:
+        return (
+            "Seçim: —", "—", "—",
+            "Seçim: —", "—", "—",
+            "Seçim: —", "—", "—",
+            "Seçim: —", "—", "—",
+            "Seçim: —", "—", "—",
+        )
+
+    if len(chosen) == 3:
+        label, values, forced_scope = chosen
+        nums = [_try_float(v) for v in values]
+        nums = [n for n in nums if n is not None]
+        if not nums:
+            scope_text = f"{label} - Seçim"
+            total_text = "—"
+            avg_text = "—"
+        else:
+            scope_text = forced_scope
+            total_text = _format_num(sum(nums))
+            avg_text = _format_num(sum(nums) / len(nums))
+    else:
+        label, selected_cells, data, columns = chosen
+        if not data or not columns:
+            scope_text = f"{label} - Seçim"
+            total_text = "—"
+            avg_text = "—"
+            values = None
+        else:
+            values = "continue"
+
+    if values == "continue":
+        # DataTable 'columns' = [{'name':..., 'id':...}, ...]
+        col_ids = [c.get("id") for c in columns if c and c.get("id") is not None]
+        if not col_ids:
+            scope_text = f"{label} - Seçim"
+            total_text = "—"
+            avg_text = "—"
+        else:
+            col_id_set = set(col_ids)
+
+            # selected_cells içinde column_id eksikse columns ile tamamla
+            fixed_cells = []
+            for c in selected_cells:
+                if not c:
+                    continue
+                if c.get("column_id") is None and c.get("column") is not None:
+                    try:
+                        ci = int(c["column"])
+                        if 0 <= ci < len(columns):
+                            cid = columns[ci].get("id")
+                            if cid is not None:
+                                c = {**c, "column_id": cid}
+                    except Exception:
+                        pass
+                fixed_cells.append(c)
+            selected_cells = fixed_cells
+
+            sel_row_idxs = sorted(set(c.get("row") for c in selected_cells if c and "row" in c))
+            sel_col_ids = set(c.get("column_id") for c in selected_cells if c and c.get("column_id") is not None)
+
+            # Tam satır: tek satır + seçilen sütun kümesi tüm tablo sütunlarıyla aynı + hücre sayısı uyumu
+            row_mode = False
+            if len(sel_row_idxs) == 1 and selected_cells:
+                r = sel_row_idxs[0]
+                same_row = all(c.get("row") == r for c in selected_cells)
+                if same_row and sel_col_ids == col_id_set and len(selected_cells) == len(col_ids):
+                    row_mode = True
+
+            # Tam sütun: tek column_id + her satırda bir hücre
+            col_mode = False
+            if len(sel_col_ids) == 1 and selected_cells:
+                cid = next(iter(sel_col_ids))
+                rows_in_sel = sorted(set(c.get("row") for c in selected_cells if c and c.get("row") is not None))
+                if (
+                    all(c.get("column_id") == cid for c in selected_cells)
+                    and len(selected_cells) == len(data)
+                    and len(rows_in_sel) == len(data)
+                    and rows_in_sel == list(range(len(data)))
+                ):
+                    col_mode = True
+
+            values = []
+            if row_mode:
+                r = sel_row_idxs[0]
+                if 0 <= r < len(data):
+                    for cid in col_ids:
+                        values.append(data[r].get(cid))
+            elif col_mode:
+                cid = next(iter(sel_col_ids))
+                for r in range(len(data)):
+                    values.append(data[r].get(cid))
+            else:
+                for c in selected_cells:
+                    r = c.get("row")
+                    cid = c.get("column_id")
+                    if r is None or cid is None:
+                        continue
+                    if 0 <= r < len(data):
+                        values.append(data[r].get(cid))
+
+            nums = [_try_float(v) for v in values]
+            nums = [n for n in nums if n is not None]
+            if not nums:
+                scope_text = f"{label} - Seçim"
+                total_text = "—"
+                avg_text = "—"
+            else:
+                total = sum(nums)
+                avg = total / len(nums)
+                scope_text = label
+                if row_mode:
+                    scope_text = f"{label} (Satır)"
+                elif col_mode:
+                    scope_text = f"{label} (Sütun)"
+                total_text = _format_num(total)
+                avg_text = _format_num(avg)
+
+    defaults = {
+        "Yük (Costcenter)": ("Seçim: —", "—", "—"),
+        "Kapasite Süresi (Costcenter)": ("Seçim: —", "—", "—"),
+        "Yük (Workcenter)": ("Seçim: —", "—", "—"),
+        "Kapasite Süresi (Workcenter)": ("Seçim: —", "—", "—"),
+        "Malzeme Yük": ("Seçim: —", "—", "—"),
+    }
+    defaults[label] = (scope_text, total_text, avg_text)
+
+    return (
+        *defaults["Yük (Costcenter)"],
+        *defaults["Kapasite Süresi (Costcenter)"],
+        *defaults["Yük (Workcenter)"],
+        *defaults["Kapasite Süresi (Workcenter)"],
+        *defaults["Malzeme Yük"],
+    )
+
+
 @app.callback(
     Output('filtered_kolon_sum', 'data'),
     Output('filtered_kolon_list', 'data'),
@@ -1373,32 +1797,71 @@ def _clear_multi_cell_highlight_on_next_click(
     Output('costcenter-col-toggle-state', 'data'),
     Input('toggle-columns-costcenter', 'n_clicks'),
     Input('year-selector', 'value'),
+    Input('kolon_sum', 'data'),
+    Input('kolon_list', 'data'),
+    Input('kolon_graph', 'data'),
+    Input('kolon_sumb', 'data'),
     State('costcenter-col-toggle-state', 'data'),
-    State('kolon_sum', 'data'),
-    State('kolon_list', 'data'),
-    State('kolon_graph', 'data'),
-    State('kolon_sumb', 'data'),
-    prevent_initial_call=True,
 )
-def toggle_costcenter_columns(n_clicks, selected_years, show_a_cols, kolon_sum, kolon_list, kolon_graph, kolon_sumb):
-   
-    
+def toggle_costcenter_columns(n_clicks, selected_years, kolon_sum, kolon_list, kolon_graph, kolon_sumb, show_a_cols):
+
     if not kolon_sum:
         raise PreventUpdate
 
-    
+    def _split_sql_select_list(select_list: str):
+        """
+        SQL SELECT listesi virgül ayırır, ama virgül parantez içinde ise bölmez.
+        Özellikle format4_graph içindeki DECIMAL(18, 3) gibi durumlar için gerekli.
+        """
+        if not select_list:
+            return []
+        parts = []
+        buf = []
+        depth = 0
+        in_square = False
+        for ch in select_list:
+            if ch == '[':
+                in_square = True
+                buf.append(ch)
+                continue
+            if ch == ']':
+                in_square = False
+                buf.append(ch)
+                continue
+
+            if not in_square:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth = max(depth - 1, 0)
+
+            # Top-level (depth==0) virgülde ayır.
+            if ch == ',' and depth == 0 and not in_square:
+                part = ''.join(buf).strip()
+                if part:
+                    parts.append(part)
+                buf = []
+                continue
+
+            buf.append(ch)
+
+        last = ''.join(buf).strip()
+        if last:
+            parts.append(last)
+        return parts
+
     trigger = ctx.triggered_id if hasattr(ctx, "triggered_id") else None
     if trigger == 'toggle-columns-costcenter':
-        new_show = not show_a_cols  # durumu tersine çevir
+        new_show = not show_a_cols
     else:
-        # triggered by year selector (or others) — keep existing toggle state
-        new_show = show_a_cols
+        # yıl seçimi, veri tipi / kolon store güncellemesi — mevcut göster/gizle durumunu koru
+        new_show = show_a_cols if show_a_cols is not None else False
 
     def _filter_sum(s):
         
         if not s:
             return s
-        parts = [p.strip() for p in s.split(',')]
+        parts = _split_sql_select_list(s)
         if new_show:
             # Hepsini göster — orijinal hali döndür
             return s
@@ -1429,10 +1892,11 @@ def toggle_costcenter_columns(n_clicks, selected_years, show_a_cols, kolon_sum, 
     filtered_sumb = _filter_sum(kolon_sumb) if kolon_sumb else kolon_sumb
     
     if selected_years:
-        if isinstance(selected_years, (str, int)):
-            years = [str(selected_years)]
+        # multi=True olduğu için selected_years list gelebilir.
+        if isinstance(selected_years, list):
+            years = [str(y).strip() for y in selected_years if y is not None and str(y).strip()]
         else:
-            years = [str(y) for y in selected_years]
+            years = [str(selected_years).strip()]
 
         def _keep_part(p):
             s = str(p)
@@ -1441,7 +1905,7 @@ def toggle_costcenter_columns(n_clicks, selected_years, show_a_cols, kolon_sum, 
         def _filter_sum_by_year(s):
             if not s:
                 return s
-            parts = [p.strip() for p in s.split(',')]
+            parts = _split_sql_select_list(s)
             filtered = [p for p in parts if _keep_part(p)]
             return ', '.join(filtered)
 
@@ -1477,85 +1941,118 @@ def update_year_selector_visibility(selected_type):
         # Veri Tipi altında düzgün: tam genişlik, üstten boşluk
         year_style = {'display': 'block', 'width': '100%', 'marginTop': '6px'}
         wrap_style = {'display': 'block', 'marginTop': '4px'}
+        # Varsayılan: tek yıl (kullanıcı isterse 2. yılı da seçer)
         return opts, [str(start_year)], year_style, wrap_style
-    return [], [], {'display': 'none'}, {'display': 'none'}
+    return [], None, {'display': 'none'}, {'display': 'none'}
 
 
-# ── "Kolonları Göster/Gizle" — workcenter_table (sadece buton tıklanınca çalışır)
+# ── "Kolonları Göster/Gizle" — workcenter / kapasite / malzeme: buton sadece store'u çevirir;
+#    hidden_columns, kolonlar oluşunca veya store değişince aşağıdaki senkron callback'lerle ayarlanır.
 @app.callback(
     Output('workcenter-col-toggle-state', 'data'),
-    Output('workcenter_table', 'hidden_columns'),
     Input('toggle-columns-workcenter', 'n_clicks'),
     State('workcenter-col-toggle-state', 'data'),
-    State('workcenter_table', 'columns'),
     prevent_initial_call=True,
 )
-def toggle_workcenter_columns(n_clicks, show_a_cols, columns):
-    if not columns:
+def toggle_workcenter_columns(n_clicks, show_a_cols):
+    if not n_clicks:
         raise PreventUpdate
-    show = show_a_cols if show_a_cols is not None else True
-    new_show = not show
-    hidden = [] if new_show else [c['id'] for c in columns if str(c.get('id', '')).endswith('A')]
-    return new_show, hidden
+    cur = show_a_cols if show_a_cols is not None else False
+    return not cur
 
 
-# ── "Kolonları Göster/Gizle" — capasity_table_costcenter ───────────────────
+@app.callback(
+    Output('workcenter_table', 'hidden_columns'),
+    Input('workcenter_table', 'columns'),
+    Input('workcenter-col-toggle-state', 'data'),
+)
+def sync_workcenter_hidden_columns(columns, show_a_cols):
+    if not columns:
+        return []
+    show = show_a_cols if show_a_cols is not None else False
+    return [] if show else [c['id'] for c in columns if str(c.get('id', '')).endswith('A')]
+
+
 @app.callback(
     Output('cap-costcenter-col-toggle-state', 'data'),
-    Output('capasity_table_costcenter', 'hidden_columns'),
     Input('toggle-columns-capacity-costcenter', 'n_clicks'),
     State('cap-costcenter-col-toggle-state', 'data'),
-    State('capasity_table_costcenter', 'columns'),
     prevent_initial_call=True,
 )
-def toggle_cap_costcenter_columns(n_clicks, show_a_cols, columns):
-    new_show = not show_a_cols
-    if not columns:
+def toggle_cap_costcenter_columns(n_clicks, show_a_cols):
+    if not n_clicks:
         raise PreventUpdate
-    if new_show:
-        hidden = []
-    else:
-        hidden = [c['id'] for c in columns if str(c['id']).endswith('A')]
-    return new_show, hidden
+    cur = show_a_cols if show_a_cols is not None else False
+    return not cur
 
 
-# ── "Kolonları Göster/Gizle" — capasity_table_workcenter (sadece buton tıklanınca çalışır)
+@app.callback(
+    Output('capasity_table_costcenter', 'hidden_columns'),
+    Input('capasity_table_costcenter', 'columns'),
+    Input('cap-costcenter-col-toggle-state', 'data'),
+)
+def sync_cap_costcenter_hidden_columns(columns, show_a_cols):
+    if not columns:
+        return []
+    show = show_a_cols if show_a_cols is not None else False
+    return [] if show else [c['id'] for c in columns if str(c.get('id', '')).endswith('A')]
+
+
 @app.callback(
     Output('cap-workcenter-col-toggle-state', 'data'),
-    Output('capasity_table_workcenter', 'hidden_columns'),
     Input('toggle-columns-capacity-workcenter', 'n_clicks'),
     State('cap-workcenter-col-toggle-state', 'data'),
-    State('capasity_table_workcenter', 'columns'),
     prevent_initial_call=True,
 )
-def toggle_cap_workcenter_columns(n_clicks, show_a_cols, columns):
-    if not columns:
+def toggle_cap_workcenter_columns(n_clicks, show_a_cols):
+    if not n_clicks:
         raise PreventUpdate
-    show = show_a_cols if show_a_cols is not None else True
-    new_show = not show
-    hidden = [] if new_show else [c['id'] for c in columns if str(c.get('id', '')).endswith('A')]
-    return new_show, hidden
+    cur = show_a_cols if show_a_cols is not None else False
+    return not cur
 
 
-# ── "Kolonları Göster/Gizle" — material_table ──────────────────────────────
+@app.callback(
+    Output('capasity_table_workcenter', 'hidden_columns'),
+    Input('capasity_table_workcenter', 'columns'),
+    Input('cap-workcenter-col-toggle-state', 'data'),
+)
+def sync_cap_workcenter_hidden_columns(columns, show_a_cols):
+    if not columns:
+        return []
+    show = show_a_cols if show_a_cols is not None else False
+    return [] if show else [c['id'] for c in columns if str(c.get('id', '')).endswith('A')]
+
+
 @app.callback(
     Output('material-col-toggle-state', 'data'),
-    Output('material_table', 'hidden_columns'),
     Input('toggle-columns-material', 'n_clicks'),
     State('material-col-toggle-state', 'data'),
-    State('material_table', 'columns'),
     prevent_initial_call=True,
 )
-def toggle_material_columns(n_clicks, show_a_cols, columns):
-    
-    new_show = not show_a_cols
-    if not columns:
+def toggle_material_columns(n_clicks, show_a_cols):
+    if not n_clicks:
         raise PreventUpdate
-    if new_show:
-        hidden = []
-    else:
-        hidden = [c['id'] for c in columns if str(c['id']).endswith('A') or c['id'] == 'MATERIAL']
-    return new_show, hidden
+    cur = show_a_cols if show_a_cols is not None else False
+    return not cur
+
+
+@app.callback(
+    Output('material_table', 'hidden_columns'),
+    Input('material_table', 'columns'),
+    Input('material-col-toggle-state', 'data'),
+)
+def sync_material_hidden_columns(columns, show_a_cols):
+    if not columns:
+        return []
+    show = show_a_cols if show_a_cols is not None else False
+    if show:
+        return []
+    # MATERIAL ve DRAWNUM kesinlikle gizlenmesin (fixed columns ile birlikte sabit kalsın).
+    return [
+        c['id']
+        for c in columns
+        if str(c.get('id', '')).endswith('A') and str(c.get('id', '')) not in ('MATERIAL', 'DRAWNUM')
+    ]
 
 
 @app.callback(
@@ -1612,7 +2109,12 @@ def update_graph(table_name, kolon_sum_filtered, kolon_sum_raw, current_costcent
     first_option = options_list[0]["value"] if options_list else None
 
     df_pivot = _clean_df_column_names(df_pivot)
-    df_pivot = df_pivot.round(1) if (selected_units and ('hours' in selected_units or 'shifts' in selected_units)) else df_pivot.round(0)
+    # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
+    df_pivot = df_pivot.round(0)
+
+    # Float dtype kalıp DataTable'da ".0" göstermesin diye sayısal kolonları int'e zorla.
+    costcenter_numeric_cols = [c for c in df_pivot.columns if c != "STAND"]
+    df_pivot[costcenter_numeric_cols] = df_pivot[costcenter_numeric_cols].round(0).astype("Int64")
 
     # Keep numeric values as numbers so numeric comparisons work
     data = df_pivot.to_dict('records')  # rowData için uygun format
@@ -1668,7 +2170,8 @@ def update_graph(table_name, kolon_sum_filtered, kolon_sum_raw, current_costcent
 
 
 
-    
+    style_data_conditional.extend(_fixed_pin_style_data_overrides(['STAND']))
+
     trigger_id = ctx.triggered_id if hasattr(ctx, "triggered_id") else None
     if trigger_id == 'table_name':
         new_costcenter_value = first_option
@@ -1821,6 +2324,7 @@ def update_capacity_and_workcenter_dropdowns(selected_costcenter, kolon_sum_filt
     Output('material_table', 'style_data_conditional'),
     Input('workcenter-dropdown', 'value'),
     Input('workcenter-capacity-dropdown', 'value'),
+    Input('year-selector', 'value'),
     State("filtered_kolon_sum", "data"),
     State("kolon_sum", "data"),
     State("filtered_kolon_list", "data"),
@@ -1835,12 +2339,15 @@ def update_capacity_and_workcenter_dropdowns(selected_costcenter, kolon_sum_filt
     State("costcenter-dropdown", "value"),
 )
 def update_workcenter(selected_workcenter, selected_capgrup,
+                      selected_year,
                       kolon_sum_filtered, kolon_sum_raw,
                       kolon_list_filtered, kolon_list_raw,
                       kolon_sumb_filtered, kolon_sumb_raw,
                       kolon_graph_filtered, kolon_graph_raw,
                       selected_units,
                       table_name, capacity_table_name, selected_costcenter):
+    # selected_year sadece callback tetiklenmesi için; gerçek filtreleme filtered_kolon_* üzerinden yapılıyor.
+    _ = selected_year
 
     kolon_sum   = kolon_sum_filtered   or kolon_sum_raw
     # Workcenter/Yük/Kapasite tablolarında A kolonları da olsun; Kolonları Gizle/Aç butonu bunları gizleyebilsin
@@ -1887,7 +2394,8 @@ def update_workcenter(selected_workcenter, selected_capgrup,
         if wc_df is None or (hasattr(wc_df, 'empty') and wc_df.empty):
             wc_data, wc_cols, wc_style = [], [], []
         else:
-            wc_df = wc_df.round(1) if (selected_units and ('hours' in selected_units or 'shifts' in selected_units)) else wc_df.round(0)
+            # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
+            wc_df = wc_df.round(0)
             # Verimlilik kolonunu ekle (tek kaynak: kapasite_data.get_verimlilik_df)
         verim_df = kapasite_data.get_verimlilik_df(ag)
         if verim_df is not None:
@@ -1896,6 +2404,10 @@ def update_workcenter(selected_workcenter, selected_capgrup,
             wc_df["Verimlilik"] = pd.to_numeric(wc_df["Verimlilik"], errors="coerce")
         else:
             wc_df["Verimlilik"] = None
+
+        # Float kalıp DataTable'da ".0" göstermesin diye kolonları int'e zorlayalım.
+        wc_numeric_cols = [c for c in wc_df.columns if c != "CAPWORK"]
+        wc_df[wc_numeric_cols] = wc_df[wc_numeric_cols].round(0).astype("Int64")
 
         # Keep numeric values as numbers so numeric comparisons work
         wc_data = wc_df.to_dict('records')
@@ -1915,6 +2427,7 @@ def update_workcenter(selected_workcenter, selected_capgrup,
             wc_style.append({'if': {'filter_query': f'{{{col}}} < 0', 'column_id': col},
                              'backgroundColor': 'rgb(180, 0, 0)', 'color': '#ffffff', 'fontWeight': '700'})
             wc_style.append({'if': {'filter_query': f'{{{col}}} = 0', 'column_id': col}, 'color': '#bbbbbb'})
+        wc_style.extend(_fixed_pin_style_data_overrides(['CAPWORK']))
     except Exception as e:
         print(f"wc_table hatası: {e}")
         wc_data, wc_cols, wc_style = [], [], []
@@ -1926,9 +2439,16 @@ def update_workcenter(selected_workcenter, selected_capgrup,
         if mat_df is None or (hasattr(mat_df, 'empty') and mat_df.empty):
             mat_data, mat_cols, mat_style = [], [], []
         else:
-            mat_df = mat_df.round(1) if (selected_units and ('hours' in selected_units or 'shifts' in selected_units)) else mat_df.round(0)
+            # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
+            mat_df = mat_df.round(0)
             filtered_cols = ['MATERIAL', 'DRAWNUM'] + [c for c in kolon_list if c in mat_df.columns]
             mat_df = mat_df[[c for c in filtered_cols if c in mat_df.columns]]
+
+            # Float kalıp DataTable'da ".0" göstermesin diye kolonları int'e zorlayalım.
+            mat_numeric_cols = [c for c in mat_df.columns if c not in ("MATERIAL", "DRAWNUM")]
+            if mat_numeric_cols:
+                mat_df[mat_numeric_cols] = mat_df[mat_numeric_cols].round(0).astype("Int64")
+
             mat_data = mat_df.to_dict('records')
             mat_numeric_cols = [c for c in kolon_list if c in mat_df.columns]
             _coerce_numeric_records(mat_data, mat_numeric_cols)
@@ -1945,6 +2465,7 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                 mat_style.append({'if': {'filter_query': f'{{{col}}} < 0', 'column_id': col},
                                   'backgroundColor': 'rgb(180, 0, 0)', 'color': '#ffffff', 'fontWeight': '700'})
                 mat_style.append({'if': {'filter_query': f'{{{col}}} = 0', 'column_id': col}, 'color': '#bbbbbb'})
+            mat_style.extend(_fixed_pin_style_data_overrides(['MATERIAL', 'DRAWNUM']))
     except Exception as e:
         print(f"material_table hatası: {e}")
         mat_data, mat_cols, mat_style = [], [], []
@@ -1981,8 +2502,8 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                     sum_df_cap_work is not None and not sum_df_cap_work.empty):
 
                 sum_df_ihtiyac['STAT'] = 'Kapasite İhtiyacı'
-                if selected_units and ('hours' in selected_units or 'shifts' in selected_units):
-                    sum_df_ihtiyac = sum_df_ihtiyac.round(1)
+                # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
+                sum_df_ihtiyac = sum_df_ihtiyac.round(0)
                 weeks_cap = [col for col in kolon_list if col in sum_df_ihtiyac.columns]
                 if not weeks_cap:
                     weeks_cap = [c for c in sum_df_ihtiyac.columns if c not in (sum_df_ihtiyac.columns[0], 'STAT')]
@@ -1990,12 +2511,9 @@ def update_workcenter(selected_workcenter, selected_capgrup,
 
                 if 'hours' in (selected_units or []):
                     sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 60
-                    sum_df_cap_work = sum_df_cap_work.round(1)
                 elif 'shifts' in (selected_units or []):
                     sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 510
-                    sum_df_cap_work = sum_df_cap_work.round(1)
-                else:
-                    sum_df_cap_work = sum_df_cap_work.round(0)
+                sum_df_cap_work = sum_df_cap_work.round(0)
 
                 toplam_row = {'STAT': 'Toplam Kapasite'}
                 toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
@@ -2008,7 +2526,7 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                         fark_row[col] = round(
                             float(cap_df_wc.loc[cap_df_wc['STAT'] == 'Toplam Kapasite', col].iloc[0]) -
                             float(cap_df_wc.loc[cap_df_wc['STAT'] == 'Kapasite İhtiyacı', col].iloc[0]),
-                            1 if 'hours' in (selected_units or []) or 'shifts' in (selected_units or []) else 0)
+                            0)
                     except Exception:
                         fark_row[col] = 0
                 cap_df_wc = pd.concat([cap_df_wc, pd.DataFrame([fark_row])], ignore_index=True)
@@ -2018,10 +2536,7 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                 cumsum_wc = cap_df_wc.loc[cap_df_wc['STAT'] == 'Kapasite Farkı', numeric_cols_wc].cumsum(axis=1)
                 cum_row = {'STAT': 'Kümülatif Toplam'}
                 cum_row.update(cumsum_wc.iloc[0].to_dict())
-                if 'hours' in (selected_units or []) or 'shifts' in (selected_units or []):
-                    cum_row = {k: round(v, 1) if isinstance(v, (int, float)) else v for k, v in cum_row.items()}
-                else:
-                    cum_row = {k: round(v, 0) if isinstance(v, (int, float)) else v for k, v in cum_row.items()}
+                cum_row = {k: round(v, 0) if isinstance(v, (int, float)) else v for k, v in cum_row.items()}
                 cap_df_wc = pd.concat([cap_df_wc, pd.DataFrame([cum_row])], ignore_index=True)
 
                 # Doluluk Oranı (%) — sayısal tutulur, > 100 filter_query için
@@ -2032,26 +2547,33 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                     try:
                         tk_val = float(tk_row[col])
                         ui_val = float(ui_row[col])
-                        doluluk_vals.append(round((ui_val / tk_val) * 100, 1) if tk_val != 0 else 0)
+                        # Doluluk Oranı(%) dakikadaki gibi 0 ondalık ve int görünsün
+                        doluluk_vals.append(round((ui_val / tk_val) * 100, 0) if tk_val != 0 else 0)
                     except Exception:
                         doluluk_vals.append(0)
                 doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks_cap)
                 doluluk_df['STAT'] = 'Doluluk Oranı(%)'
-                if 'hours' in (selected_units or []) or 'shifts' in (selected_units or []):
-                    doluluk_df = doluluk_df.round(1)
-                else:
-                    doluluk_df = doluluk_df.round(0)
+                # Saat/Vardiyada da dakika ile aynı görünüm (0 ondalık).
+                doluluk_df = doluluk_df.round(0)
 
                 
                 cap_df_wc = pd.concat([cap_df_wc, doluluk_df], ignore_index=True)
                 for col in weeks_cap:
                     cap_df_wc[col] = pd.to_numeric(cap_df_wc[col], errors='coerce')
 
-                # 1. accordion ile aynı: virgülden sonra basamak — saat/vardiya ise 1, dakika ise 0
-                if 'hours' in (selected_units or []) or 'shifts' in (selected_units or []):
-                    cap_df_wc[weeks_cap] = cap_df_wc[weeks_cap].round(1)
-                else:
-                    cap_df_wc[weeks_cap] = cap_df_wc[weeks_cap].round(0)
+                # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
+                cap_df_wc[weeks_cap] = cap_df_wc[weeks_cap].round(0).astype("Int64")
+
+                # Doluluk satırı (STAT = "Doluluk Oranı(%)") her zaman 0 ondalık görünsün
+                # (saat/vardiya için yapılan round(1) dolulukta ".0" oluşturuyordu).
+                dol_mask = cap_df_wc['STAT'] == 'Doluluk Oranı(%)'
+                if dol_mask.any():
+                    # float kalmasın: DataTable'da ".0" gibi görünmesin diye int tipine çeviriyoruz
+                    cap_df_wc.loc[dol_mask, weeks_cap] = (
+                        cap_df_wc.loc[dol_mask, weeks_cap]
+                        .round(0)
+                        .astype("Int64")
+                    )
 
                 # Keep capacity numbers numeric so numeric style rules (>=100, <0) work
                 cap_data = cap_df_wc.to_dict('records')
@@ -2072,6 +2594,7 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                     
                     cap_wc_style.append({'if': {'filter_query': f'{{STAT}} = "Doluluk Oranı(%)" && {{{col}}} >= 100', 'column_id': col},
                                          'backgroundColor': 'rgb(180, 0, 0)', 'color': '#ffffff', 'fontWeight': '700'})
+                cap_wc_style.extend(_fixed_pin_style_data_overrides(['STAT']))
         except Exception as e:
             print(f"capasity_table_workcenter hatası: {e}")
             cap_data, cap_cols_def, cap_wc_style = [], [], []
@@ -2283,7 +2806,8 @@ def download_costcenter(n_clicks, kolon_sum_filtered, kolon_sum_raw, table_name,
     if df is None or (hasattr(df, 'empty') and df.empty):
         raise PreventUpdate
     try:
-        df = df.round(1) if (selected_units and ('hours' in selected_units or 'shifts' in selected_units)) else df.round(0)
+        # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
+        df = df.round(0)
     except Exception:
         pass
     try:
@@ -2369,7 +2893,8 @@ def download_malzeme(n_clicks, kolon_sum_filtered, kolon_sum_raw, kolon_list_fil
     if df is None or (hasattr(df, 'empty') and df.empty):
         raise PreventUpdate
     try:
-        df = df.round(1) if (selected_units and ('hours' in selected_units or 'shifts' in selected_units)) else df.round(0)
+        # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
+        df = df.round(0)
     except Exception:
         pass
     try:
@@ -2421,6 +2946,7 @@ def toggle_panels(active_item, close_all_clicks, close_cc_clicks, close_wc_click
     Output('capasity_table_costcenter', 'style_data_conditional'),
     Input('costcenter-dropdown', 'value'),
     Input('workcenter-capacity-dropdown', 'value'),
+    Input('year-selector', 'value'),
     State("filtered_kolon_sum", "data"),
     State("kolon_sum", "data"),
     State("filtered_kolon_list", "data"),
@@ -2432,14 +2958,20 @@ def toggle_panels(active_item, close_all_clicks, close_cc_clicks, close_wc_click
     State("capacity_table_name", "data"),
 )
 def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
+                                      selected_year,
                                       kolon_sum_filtered, kolon_sum_raw,
                                       kolon_list_filtered, kolon_list_raw,
                                       kolon_sumb_filtered, kolon_sumb_raw,
                                       selected_units,
                                       table_name, capacity_table_name):
-    kolon_sum  = kolon_sum_filtered  or kolon_sum_raw
-    kolon_list = kolon_list_filtered or kolon_list_raw
-    kolon_sumb = kolon_sumb_filtered or kolon_sumb_raw
+    # selected_year sadece callback tetiklemek için; gerçek içerik filtered_kolon_* ile geliyor.
+    _ = selected_year
+    # Kapasite Süresi (Costcenter) tablosu kolonları için:
+    # "Kolonları Göster/Gizle" butonu hidden_columns üzerinden A kolonlarını açıp kapatsın.
+    # Bu yüzden A kolonları filtered state yüzünden daha baştan filtrelenmesin; raw kolonları kullanıyoruz.
+    kolon_sum = kolon_sum_raw or kolon_sum_filtered
+    kolon_list = kolon_list_raw or kolon_list_filtered
+    kolon_sumb = kolon_sumb_raw or kolon_sumb_filtered
 
     if not table_name or not kolon_sum or not selected_costcenter:
         raise PreventUpdate
@@ -2467,8 +2999,8 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
         if sum_df is None or sum_df.empty or sum_df_cap_work is None or sum_df_cap_work.empty:
             return [], [], []
 
-        if selected_units and ('hours' in selected_units or 'shifts' in selected_units):
-            sum_df = sum_df.round(1)
+        # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
+        sum_df = sum_df.round(0)
         sum_df['STAT'] = 'Kapasite İhtiyacı'
         weeks = [col for col in kolon_list if col in sum_df.columns]
         if not weeks:
@@ -2477,12 +3009,9 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
 
         if 'hours' in (selected_units or []):
             sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 60
-            sum_df_cap_work = sum_df_cap_work.round(1)
         elif 'shifts' in (selected_units or []):
             sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 510
-            sum_df_cap_work = sum_df_cap_work.round(1)
-        else:
-            sum_df_cap_work = sum_df_cap_work.round(0)
+        sum_df_cap_work = sum_df_cap_work.round(0)
 
         toplam_row = {'STAT': 'Toplam Kapasite'}
         toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
@@ -2494,7 +3023,7 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
                 fark_row[col] = round(
                     float(cap_df.loc[cap_df['STAT'] == 'Toplam Kapasite', col].iloc[0]) -
                     float(cap_df.loc[cap_df['STAT'] == 'Kapasite İhtiyacı', col].iloc[0]),
-                    1 if 'hours' in (selected_units or []) or 'shifts' in (selected_units or []) else 0)
+                    0)
             except Exception:
                 fark_row[col] = 0
         cap_df = pd.concat([cap_df, pd.DataFrame([fark_row])], ignore_index=True)
@@ -2503,10 +3032,7 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
         cumsum = cap_df.loc[cap_df['STAT'] == 'Kapasite Farkı', numeric_cols].cumsum(axis=1)
         cum_row = {'STAT': 'Kümülatif Toplam'}
         cum_row.update(cumsum.iloc[0].to_dict())
-        if 'hours' in (selected_units or []) or 'shifts' in (selected_units or []):
-            cum_row = {k: round(v, 1) if isinstance(v, (int, float)) else v for k, v in cum_row.items()}
-        else:
-            cum_row = {k: round(v, 0) if isinstance(v, (int, float)) else v for k, v in cum_row.items()}
+        cum_row = {k: round(v, 0) if isinstance(v, (int, float)) else v for k, v in cum_row.items()}
         cap_df = pd.concat([cap_df, pd.DataFrame([cum_row])], ignore_index=True)
 
         # Doluluk Oranı (%) — sayısal tutulur, > 100 filter_query için
@@ -2517,25 +3043,32 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
             try:
                 tk = float(tk_row[col])
                 ui = float(ui_row[col])
-                doluluk_vals.append(round((ui / tk) * 100, 1) if tk != 0 else 0)
+                # Saat/Vardiya sonuçları dakika ile aynı tipte görünsün: 0 ondalık
+                doluluk_vals.append(round((ui / tk) * 100, 0) if tk != 0 else 0)
             except Exception:
                 doluluk_vals.append(0)
         doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks)
         doluluk_df['STAT'] = 'Doluluk Oranı(%)'
-        if 'hours' in (selected_units or []) or 'shifts' in (selected_units or []):
-            doluluk_df = doluluk_df.round(1)
-        else:
-            doluluk_df = doluluk_df.round(0)
+        # Saat/Vardiyada da dakika gibi 0 ondalık
+        doluluk_df = doluluk_df.round(0)
 
-        # Prepare final DataFrame and format for display (strings with thousand separators)
-        if 'hours' in (selected_units or []) or 'shifts' in (selected_units or []):
-            cap_df = cap_df.round(1)
-            doluluk_df = doluluk_df.round(1)
-        else:
-            cap_df = cap_df.round(0)
-            doluluk_df = doluluk_df.round(0)
+        # Prepare final DataFrame and format for display
+        # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
+        cap_df = cap_df.round(0)
 
         cap_df_prepared = pd.concat([cap_df, doluluk_df], ignore_index=True)
+
+        # Float kalıp DataTable'da ".0" göstermesin diye kolonları int'e zorlayalım.
+        cap_df_prepared[weeks] = cap_df_prepared[weeks].round(0).astype("Int64")
+
+        # Doluluk satırı her zaman 0 ondalık görünsün
+        dol_mask = cap_df_prepared['STAT'] == 'Doluluk Oranı(%)'
+        if dol_mask.any():
+            cap_df_prepared.loc[dol_mask, weeks] = (
+                cap_df_prepared.loc[dol_mask, weeks]
+                .round(0)
+                .astype("Int64")
+            )
         # Convert to records and coerce formatted strings to numeric types
         cap_records = cap_df_prepared.to_dict('records')
         _coerce_numeric_records(cap_records, weeks)
@@ -2556,6 +3089,7 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
             # Doluluk Oranı > 100 → kırmızı arka plan
             sdc.append({'if': {'filter_query': f'{{STAT}} = "Doluluk Oranı(%)" && {{{col}}} >= 100', 'column_id': col},
                         'backgroundColor': '#dc2626', 'color': '#ffffff', 'fontWeight': '700'})
+        sdc.extend(_fixed_pin_style_data_overrides(['STAT']))
 
         # Debugging: print sample rows and style rules to server log
         try:

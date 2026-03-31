@@ -17,3 +17,6 @@ build/
 *.swp
 .env
 .env.local
+logs/
+*.zip
+scheduled_reports/

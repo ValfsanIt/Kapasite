@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 import threading
+import warnings
 
 import pandas as pd
 
@@ -69,12 +70,22 @@ def run_query(sql):
     if pyodbc is None:
         print("Uyarı: pyodbc yüklü değil. pip install pyodbc")
         return pd.DataFrame()
+    def _read_sql_frame(c):
+        # pandas warns on every pyodbc read_sql; DBAPI2 is fine in practice.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*pandas only supports SQLAlchemy connectable.*",
+                category=UserWarning,
+            )
+            return pd.read_sql(sql, c)
+
     try:
         conn = getattr(_THREAD_STATE, "conn", None)
         if conn is not None:
-            return pd.read_sql(sql, conn)
+            return _read_sql_frame(conn)
         with _get_conn() as new_conn:
-            return pd.read_sql(sql, new_conn)
+            return _read_sql_frame(new_conn)
     except Exception as e:
         print(f"run_query hatası: {e}")
         return pd.DataFrame()

@@ -2696,7 +2696,7 @@
   #panel-costcenter th.dash-fixed-column.dash-fixed-row,
   #panel-workcenter th.dash-fixed-column.dash-fixed-row {
   z-index: 1002 !important;
-  background: #1e293b !important;
+  background: #0d9488 !important;
   isolation: isolate !important;
   transform: translateZ(0) !important;
   min-width: 0 !important; /* geniÅŸlik Python style_cell_conditional ile gelir */
@@ -2806,18 +2806,18 @@
   text-align: left !important;
   padding-left: 12px !important;
   font-weight: 800 !important;
-  background-color: #475569;
+  background-color: #14b8a6;
   color: #ffffff;
   }
   .kap-fullscreen-panel .dash-spreadsheet tbody tr:nth-child(even) td.dash-cell:first-child,
   .kap-fullscreen-panel .dash-spreadsheet tbody tr:nth-child(even) td.dash-fixed-column {
-  background-color: #64748b;
+  background-color: #0d9488;
   color: #ffffff;
   }
   /* hover efekti â€” Python highlight aktifken Python kazanÄ±r */
   .kap-fullscreen-panel .dash-spreadsheet tbody tr:hover td.dash-cell:first-child,
   .kap-fullscreen-panel .dash-spreadsheet tbody tr:hover td.dash-fixed-column {
-  background-color: #334155;
+  background-color: #0f766e;
   color: #ffffff;
   }
   
@@ -2835,12 +2835,12 @@
  
   .kap-fullscreen-panel .dash-spreadsheet td.dash-cell:first-child,
   .kap-fullscreen-panel .dash-spreadsheet td.dash-fixed-column {
-    background-color: #475569 !important;
+    background-color: #14b8a6 !important;
     color: #ffffff !important;
   }
   .kap-fullscreen-panel .dash-spreadsheet tbody tr:nth-child(even) td.dash-cell:first-child,
   .kap-fullscreen-panel .dash-spreadsheet tbody tr:nth-child(even) td.dash-fixed-column {
-    background-color: #64748b !important;
+    background-color: #0d9488 !important;
     color: #ffffff !important;
   }
   
@@ -4318,4 +4318,70 @@
 .dash-table-container .show-hide,
 .dash-table-container .dash-spreadsheet-menu .show-hide {
   display: none !important;
+}
+
+/* ---------- Table visual cleanup (latest override) ---------- */
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet,
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet {
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 10px !important;
+  overflow: hidden !important;
+  background: #ffffff !important;
+}
+
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet th.dash-header,
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet th.dash-header {
+  background: #1d4ed8 !important;
+  color: #ffffff !important;
+  border-bottom: 1px solid #1e40af !important;
+  letter-spacing: 0.02em !important;
+  text-transform: none !important;
+}
+
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet td.dash-cell,
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet td.dash-cell {
+  border-right: 1px solid #dbe4f0 !important;
+  border-bottom: 1px solid #dbe4f0 !important;
+  color: #0f172a !important;
+  font-weight: 500 !important;
+}
+
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet tbody tr:nth-child(odd) td.dash-cell:not(.dash-fixed-column),
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet tbody tr:nth-child(odd) td.dash-cell:not(.dash-fixed-column) {
+  background: #f8fbff !important;
+}
+
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet tbody tr:nth-child(even) td.dash-cell:not(.dash-fixed-column),
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet tbody tr:nth-child(even) td.dash-cell:not(.dash-fixed-column) {
+  background: #ffffff !important;
+}
+
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet tbody tr:hover td.dash-cell:not(.dash-fixed-column),
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet tbody tr:hover td.dash-cell:not(.dash-fixed-column) {
+  background: #eaf2ff !important;
+}
+
+/* Fixed/pinned left columns */
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet td.dash-fixed-column,
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet td.dash-fixed-column {
+  background: #0f766e !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
+}
+
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet tbody tr:nth-child(even) td.dash-fixed-column,
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet tbody tr:nth-child(even) td.dash-fixed-column {
+  background: #0d9488 !important;
+}
+
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet th.dash-fixed-column,
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet th.dash-fixed-column {
+  background: #0b5f58 !important;
+  color: #ffffff !important;
+}
+
+/* Active/focused cell */
+#panel-costcenter .dash-spreadsheet-container .dash-spreadsheet td.dash-cell.focused,
+#panel-workcenter .dash-spreadsheet-container .dash-spreadsheet td.dash-cell.focused {
+  box-shadow: inset 0 0 0 2px #f59e0b !important;
 }

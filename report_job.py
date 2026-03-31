@@ -14,9 +14,35 @@ if _RUN_DIR not in sys.path:
 from agent import ag  # type: ignore[reportMissingImports]
 
 
+def _save_zip_outputs(zip_bytes):
+    """ZIP'i tarihli dosya + latest kopyası olarak diske kaydet."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    out_dir = (os.environ.get("KAP_REPORT_OUT_DIR") or "").strip()
+    if not out_dir:
+        out_dir = os.path.join(root, "scheduled_reports")
+    os.makedirs(out_dir, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dated_name = f"kapasite_raporlar_{ts}.zip"
+    dated_path = os.path.join(out_dir, dated_name)
+    latest_path = os.path.join(out_dir, "kapasite_raporlar_latest.zip")
+
+    with open(dated_path, "wb") as f:
+        f.write(zip_bytes)
+    with open(latest_path, "wb") as f:
+        f.write(zip_bytes)
+
+    return dated_path, latest_path
+
+
 def main():
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[report_job] Basladi: {started_at}")
+
+    single_cc = (os.environ.get("KAP_REPORT_SINGLE_CC") or "").strip()
+    if single_cc:
+        raporlama.RAPORLAMA_SINGLE_COSTCENTER = "__AUTO__" if single_cc.lower() == "auto" else single_cc
+        print(f"[report_job] Single costcenter modu aktif: {raporlama.RAPORLAMA_SINGLE_COSTCENTER}")
 
     if ag is None:
         ok, msg = raporlama._send_report_notification_email(
@@ -48,6 +74,15 @@ def main():
         )
         print(f"[report_job] ZIP olusmadi. mail_ok={ok} msg={msg}")
         return 1
+
+    try:
+        dated_path, latest_path = _save_zip_outputs(zip_bytes)
+        print(f"[report_job] ZIP kaydedildi: {dated_path}")
+        print(f"[report_job] ZIP latest: {latest_path}")
+    except Exception as exc:
+        print(f"[report_job] ZIP diske yazilamadi: {exc!r}")
+        traceback.print_exc()
+        # Mail gonderimi yine denensin; gorev tamamen durmasin.
 
     ok, msg = raporlama._send_report_notification_email(
         status="BASARILI",
