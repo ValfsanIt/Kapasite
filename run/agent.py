@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 import threading
+import time
 import warnings
 
 import pandas as pd
@@ -80,15 +81,37 @@ def run_query(sql):
             )
             return pd.read_sql(sql, c)
 
-    try:
+    def _looks_transient_db_error(err):
+        msg = str(err).lower()
+        transient_tokens = (
+            "08s01",
+            "dbnetlib",
+            "communication link failure",
+            "connectionread",
+            "genel ağ hatası",
+            "network-related",
+            "connection is busy",
+        )
+        return any(t in msg for t in transient_tokens)
+
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
         conn = getattr(_THREAD_STATE, "conn", None)
-        if conn is not None:
-            return _read_sql_frame(conn)
-        with _get_conn() as new_conn:
-            return _read_sql_frame(new_conn)
-    except Exception as e:
-        print(f"run_query hatası: {e}")
-        return pd.DataFrame()
+        try:
+            if conn is not None:
+                return _read_sql_frame(conn)
+            with _get_conn() as new_conn:
+                return _read_sql_frame(new_conn)
+        except Exception as e:
+            is_transient = _looks_transient_db_error(e)
+            print(f"run_query hatası (deneme {attempt}/{max_attempts}): {e}")
+            if conn is not None:
+                # use_connection içindeki paylaşılan bağlantı bozulduysa, tekrar denemede taze bağlantı zorla.
+                _THREAD_STATE.conn = None
+            if (not is_transient) or attempt >= max_attempts:
+                return pd.DataFrame()
+            time.sleep(0.25 * attempt)
+    return pd.DataFrame()
 
 
 class Agent:

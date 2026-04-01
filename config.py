@@ -34,7 +34,7 @@ else:
 # Raporlama e-posta alıcıları (çoklu destek)
 # İleride kişi eklenecekse sadece bu listeleri güncellemeniz yeterli.
 RAPORLAMA_NOTIFY_TO = ["dayyildiz@valfsan.com.tr"]
-RAPORLAMA_NOTIFY_CC = []
+RAPORLAMA_NOTIFY_CC = ["itstajyer@valfsan.com.tr"]
 RAPORLAMA_NOTIFY_BCC = []
 
 

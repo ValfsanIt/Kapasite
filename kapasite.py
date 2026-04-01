@@ -315,6 +315,35 @@ def _select_sum_with_unit(kolon_list, selected_units):
     return ", ".join(parts)
 
 
+def _unit_decimals(selected_units):
+    if selected_units and "hours" in selected_units:
+        return 1
+    if selected_units and "shifts" in selected_units:
+        return 2
+    return 0
+
+
+def _is_a_col(col_name):
+    return str(col_name).strip().endswith("A")
+
+
+def _format_numeric_cols_by_unit(df, numeric_cols, selected_units):
+    """Saat: 1, Vardiya: 2, Dakika: 0; A kolonları her zaman int."""
+    if df is None or df.empty or not numeric_cols:
+        return df
+    base_dec = _unit_decimals(selected_units)
+    for col in numeric_cols:
+        if col not in df.columns:
+            continue
+        ser = pd.to_numeric(df[col], errors="coerce")
+        dec = 0 if _is_a_col(col) else base_dec
+        ser = ser.round(dec)
+        if dec == 0:
+            ser = ser.astype("Int64")
+        df[col] = ser
+    return df
+
+
 def format_with_thousands_separator(df, kolonlar):
     
     if df is None or kolonlar is None:
@@ -533,10 +562,10 @@ _HEADER_STYLE       = {'fontWeight': 'bold', 'minWidth': '90px',
                         'minHeight': '44px', 'padding': '10px 8px',
                         'overflow': 'visible', 'lineHeight': '1.3', 'verticalAlign': 'middle'}
 
-# Sabit (sol) kolonlar — canlı teal (CSS + zebra override ile uyumlu)
-_FIXED_PIN_COL_BG = '#14b8a6'
-_FIXED_PIN_COL_FG = '#ffffff'
-_FIXED_PIN_HEADER_BG = '#0d9488'
+# Sabit (sol) kolonlar — daha yumuşak gri ton (kaydırmada gözü yormasın)
+_FIXED_PIN_COL_BG = '#edf1f5'
+_FIXED_PIN_COL_FG = '#1f2d3d'
+_FIXED_PIN_HEADER_BG = '#d7dfe7'
 
 
 def _fixed_pin_cell_rule(column_id, min_w, max_w):
@@ -784,6 +813,12 @@ layout = dbc.Container([
             n_intervals=0,
             disabled=True,
         ),
+        dcc.Interval(
+            id='wc-grafik-load-hide',
+            interval=1500,
+            n_intervals=0,
+            disabled=True,
+        ),
 
     ], className="kap-control-panel"),
 
@@ -994,6 +1029,15 @@ layout = dbc.Container([
                     html.Div([
                         _section_badge("📈", "Workcenter Grafik", "Makine bazlı kapasite yük oranı"),
                         html.Div(id="selection-info-workcenter-grafik", className="kap-selection-info", style={"marginBottom": "8px"}),
+                        html.Div(
+                            id='wc-grafik-loading-hint',
+                            className='kap-header-veri-tipi-loading',
+                            style={'display': 'none', 'marginBottom': '8px'},
+                            children=[
+                                html.Span(className='kap-veri-tipi-spinner kap-veri-tipi-spinner--header', **{'aria-hidden': 'true'}),
+                                html.Span('Veriler Güncelleniyor', className='kap-veri-tipi-loading-text kap-veri-tipi-loading-text--header'),
+                            ],
+                        ),
                         html.Div([
                             # 1) Kapasite Grubu
                             html.Div([
@@ -1314,6 +1358,8 @@ def update_selection_info_labels(veri_tipi, costcenter_value):
 
 _VERI_TIPI_HINT_VISIBLE = {'display': 'flex'}
 _VERI_TIPI_HINT_HIDDEN = {'display': 'none'}
+_WC_GRAFIK_HINT_VISIBLE = {'display': 'flex', 'marginBottom': '8px'}
+_WC_GRAFIK_HINT_HIDDEN = {'display': 'none'}
 
 
 @app.callback(
@@ -1340,6 +1386,30 @@ def veri_tipi_hide_loading_hint(n):
     if n is None or n < 1:
         raise PreventUpdate
     return _VERI_TIPI_HINT_HIDDEN, True
+
+
+@app.callback(
+    Output('wc-grafik-loading-hint', 'style'),
+    Output('wc-grafik-load-hide', 'disabled'),
+    Output('wc-grafik-load-hide', 'n_intervals'),
+    Input('workcenter-capacity-dropdown', 'value'),
+    Input('workcenter-dropdown', 'value'),
+    prevent_initial_call=True,
+)
+def wc_grafik_show_loading_hint(_capgrp, _wc):
+    return _WC_GRAFIK_HINT_VISIBLE, False, 0
+
+
+@app.callback(
+    Output('wc-grafik-loading-hint', 'style', allow_duplicate=True),
+    Output('wc-grafik-load-hide', 'disabled', allow_duplicate=True),
+    Input('wc-grafik-load-hide', 'n_intervals'),
+    prevent_initial_call=True,
+)
+def wc_grafik_hide_loading_hint(n):
+    if n is None or n < 1:
+        raise PreventUpdate
+    return _WC_GRAFIK_HINT_HIDDEN, True
 
 
 @app.callback(
@@ -2109,12 +2179,8 @@ def update_graph(table_name, kolon_sum_filtered, kolon_sum_raw, current_costcent
     first_option = options_list[0]["value"] if options_list else None
 
     df_pivot = _clean_df_column_names(df_pivot)
-    # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
-    df_pivot = df_pivot.round(0)
-
-    # Float dtype kalıp DataTable'da ".0" göstermesin diye sayısal kolonları int'e zorla.
     costcenter_numeric_cols = [c for c in df_pivot.columns if c != "STAND"]
-    df_pivot[costcenter_numeric_cols] = df_pivot[costcenter_numeric_cols].round(0).astype("Int64")
+    _format_numeric_cols_by_unit(df_pivot, costcenter_numeric_cols, selected_units)
 
     # Keep numeric values as numbers so numeric comparisons work
     data = df_pivot.to_dict('records')  # rowData için uygun format
@@ -2253,6 +2319,8 @@ def update_capacity_and_workcenter_dropdowns(selected_costcenter, kolon_sum_filt
         return options_list_cap, empty_fig, options_workcenter, 'Hepsi'
 
     pivot_df_fig = pd.melt(sum_df_fig, id_vars=['STAND'], var_name='current_week', value_name='value_min')
+    pivot_df_fig['value_min'] = pd.to_numeric(pivot_df_fig['value_min'], errors='coerce')
+    pivot_df_fig['value_min'] = pivot_df_fig['value_min'].round(_unit_decimals(selected_units))
 
 
 
@@ -2325,6 +2393,7 @@ def update_capacity_and_workcenter_dropdowns(selected_costcenter, kolon_sum_filt
     Input('workcenter-dropdown', 'value'),
     Input('workcenter-capacity-dropdown', 'value'),
     Input('year-selector', 'value'),
+    Input('unit-checkbox', 'value'),
     State("filtered_kolon_sum", "data"),
     State("kolon_sum", "data"),
     State("filtered_kolon_list", "data"),
@@ -2333,18 +2402,17 @@ def update_capacity_and_workcenter_dropdowns(selected_costcenter, kolon_sum_filt
     State("kolon_sumb", "data"),
     State("filtered_kolon_graph", "data"),
     State("kolon_graph", "data"),
-    State('unit-checkbox', 'value'),
     State("table_name", "data"),
     State("capacity_table_name", "data"),
     State("costcenter-dropdown", "value"),
 )
 def update_workcenter(selected_workcenter, selected_capgrup,
                       selected_year,
+                      selected_units,
                       kolon_sum_filtered, kolon_sum_raw,
                       kolon_list_filtered, kolon_list_raw,
                       kolon_sumb_filtered, kolon_sumb_raw,
                       kolon_graph_filtered, kolon_graph_raw,
-                      selected_units,
                       table_name, capacity_table_name, selected_costcenter):
     # selected_year sadece callback tetiklenmesi için; gerçek filtreleme filtered_kolon_* üzerinden yapılıyor.
     _ = selected_year
@@ -2394,8 +2462,8 @@ def update_workcenter(selected_workcenter, selected_capgrup,
         if wc_df is None or (hasattr(wc_df, 'empty') and wc_df.empty):
             wc_data, wc_cols, wc_style = [], [], []
         else:
-            # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
-            wc_df = wc_df.round(0)
+            wc_numeric_cols = [c for c in wc_df.columns if c != "CAPWORK"]
+            _format_numeric_cols_by_unit(wc_df, wc_numeric_cols, selected_units)
             # Verimlilik kolonunu ekle (tek kaynak: kapasite_data.get_verimlilik_df)
         verim_df = kapasite_data.get_verimlilik_df(ag)
         if verim_df is not None:
@@ -2405,9 +2473,7 @@ def update_workcenter(selected_workcenter, selected_capgrup,
         else:
             wc_df["Verimlilik"] = None
 
-        # Float kalıp DataTable'da ".0" göstermesin diye kolonları int'e zorlayalım.
         wc_numeric_cols = [c for c in wc_df.columns if c != "CAPWORK"]
-        wc_df[wc_numeric_cols] = wc_df[wc_numeric_cols].round(0).astype("Int64")
 
         # Keep numeric values as numbers so numeric comparisons work
         wc_data = wc_df.to_dict('records')
@@ -2439,15 +2505,10 @@ def update_workcenter(selected_workcenter, selected_capgrup,
         if mat_df is None or (hasattr(mat_df, 'empty') and mat_df.empty):
             mat_data, mat_cols, mat_style = [], [], []
         else:
-            # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
-            mat_df = mat_df.round(0)
+            mat_numeric_cols = [c for c in mat_df.columns if c not in ("MATERIAL", "DRAWNUM")]
+            _format_numeric_cols_by_unit(mat_df, mat_numeric_cols, selected_units)
             filtered_cols = ['MATERIAL', 'DRAWNUM'] + [c for c in kolon_list if c in mat_df.columns]
             mat_df = mat_df[[c for c in filtered_cols if c in mat_df.columns]]
-
-            # Float kalıp DataTable'da ".0" göstermesin diye kolonları int'e zorlayalım.
-            mat_numeric_cols = [c for c in mat_df.columns if c not in ("MATERIAL", "DRAWNUM")]
-            if mat_numeric_cols:
-                mat_df[mat_numeric_cols] = mat_df[mat_numeric_cols].round(0).astype("Int64")
 
             mat_data = mat_df.to_dict('records')
             mat_numeric_cols = [c for c in kolon_list if c in mat_df.columns]
@@ -2502,8 +2563,8 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                     sum_df_cap_work is not None and not sum_df_cap_work.empty):
 
                 sum_df_ihtiyac['STAT'] = 'Kapasite İhtiyacı'
-                # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
-                sum_df_ihtiyac = sum_df_ihtiyac.round(0)
+                need_numeric_cols = [c for c in sum_df_ihtiyac.columns if c not in ("STAND", "CAPWORK", "STAT")]
+                _format_numeric_cols_by_unit(sum_df_ihtiyac, need_numeric_cols, selected_units)
                 weeks_cap = [col for col in kolon_list if col in sum_df_ihtiyac.columns]
                 if not weeks_cap:
                     weeks_cap = [c for c in sum_df_ihtiyac.columns if c not in (sum_df_ihtiyac.columns[0], 'STAT')]
@@ -2513,7 +2574,8 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                     sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 60
                 elif 'shifts' in (selected_units or []):
                     sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 510
-                sum_df_cap_work = sum_df_cap_work.round(0)
+                cap_work_numeric_cols = [c for c in sum_df_cap_work.columns if c not in ("STAND", "CAPWORK")]
+                _format_numeric_cols_by_unit(sum_df_cap_work, cap_work_numeric_cols, selected_units)
 
                 toplam_row = {'STAT': 'Toplam Kapasite'}
                 toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
@@ -2553,26 +2615,20 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                         doluluk_vals.append(0)
                 doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks_cap)
                 doluluk_df['STAT'] = 'Doluluk Oranı(%)'
-                # Saat/Vardiyada da dakika ile aynı görünüm (0 ondalık).
-                doluluk_df = doluluk_df.round(0)
+                doluluk_df = doluluk_df.round(_unit_decimals(selected_units))
 
                 
                 cap_df_wc = pd.concat([cap_df_wc, doluluk_df], ignore_index=True)
                 for col in weeks_cap:
                     cap_df_wc[col] = pd.to_numeric(cap_df_wc[col], errors='coerce')
 
-                # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
-                cap_df_wc[weeks_cap] = cap_df_wc[weeks_cap].round(0).astype("Int64")
+                _format_numeric_cols_by_unit(cap_df_wc, weeks_cap, selected_units)
 
-                # Doluluk satırı (STAT = "Doluluk Oranı(%)") her zaman 0 ondalık görünsün
-                # (saat/vardiya için yapılan round(1) dolulukta ".0" oluşturuyordu).
                 dol_mask = cap_df_wc['STAT'] == 'Doluluk Oranı(%)'
                 if dol_mask.any():
-                    # float kalmasın: DataTable'da ".0" gibi görünmesin diye int tipine çeviriyoruz
                     cap_df_wc.loc[dol_mask, weeks_cap] = (
                         cap_df_wc.loc[dol_mask, weeks_cap]
-                        .round(0)
-                        .astype("Int64")
+                        .round(_unit_decimals(selected_units))
                     )
 
                 # Keep capacity numbers numeric so numeric style rules (>=100, <0) work
@@ -2585,15 +2641,29 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                     {'if': {'row_index': 'odd'},  'backgroundColor': '#eef4ff'},
                     {'if': {'row_index': 'even'}, 'backgroundColor': '#ffffff'},
                 ]
-                for col in weeks_cap:
-                    
-                    cap_wc_style.append({'if': {'filter_query': f'{{{col}}} < 0', 'column_id': col},
-                                         'backgroundColor': 'rgb(180, 0, 0)', 'color': '#ffffff', 'fontWeight': '700'})
-                    
-                    cap_wc_style.append({'if': {'filter_query': f'{{{col}}} = 0', 'column_id': col}, 'color': '#bbbbbb'})
-                    
-                    cap_wc_style.append({'if': {'filter_query': f'{{STAT}} = "Doluluk Oranı(%)" && {{{col}}} >= 100', 'column_id': col},
-                                         'backgroundColor': 'rgb(180, 0, 0)', 'color': '#ffffff', 'fontWeight': '700'})
+                # Filter parser farklılıklarına takılmamak için hücre bazlı (row_index + column_id) kural.
+                for ridx, rec in enumerate(cap_data):
+                    is_doluluk_row = str(rec.get('STAT') or '').strip() == 'Doluluk Oranı(%)'
+                    for col in weeks_cap:
+                        v = rec.get(col)
+                        if v is None:
+                            continue
+                        try:
+                            fv = float(v)
+                        except Exception:
+                            continue
+                        if fv < 0 or (is_doluluk_row and fv >= 100):
+                            cap_wc_style.append({
+                                'if': {'row_index': ridx, 'column_id': col},
+                                'backgroundColor': 'rgb(180, 0, 0)',
+                                'color': '#ffffff',
+                                'fontWeight': '700',
+                            })
+                        elif fv == 0:
+                            cap_wc_style.append({
+                                'if': {'row_index': ridx, 'column_id': col},
+                                'color': '#bbbbbb',
+                            })
                 cap_wc_style.extend(_fixed_pin_style_data_overrides(['STAT']))
         except Exception as e:
             print(f"capasity_table_workcenter hatası: {e}")
@@ -2645,6 +2715,7 @@ def update_workcenter(selected_workcenter, selected_capgrup,
             if df_figx is not None and not (hasattr(df_figx, 'empty') and df_figx.empty) and len(df_figx) > 0:
                 pivot_figx = pd.melt(df_figx, id_vars=[id_var], var_name='hafta', value_name='deger')
                 pivot_figx['deger'] = pd.to_numeric(pivot_figx['deger'], errors='coerce').fillna(0)
+                pivot_figx['deger'] = pivot_figx['deger'].round(_unit_decimals(selected_units))
 
                 if len(pivot_figx) > 0:
                     # Kırmızı (>100) / Mavi (<=100) renklendirme
@@ -2947,22 +3018,22 @@ def toggle_panels(active_item, close_all_clicks, close_cc_clicks, close_wc_click
     Input('costcenter-dropdown', 'value'),
     Input('workcenter-capacity-dropdown', 'value'),
     Input('year-selector', 'value'),
+    Input('unit-checkbox', 'value'),
     State("filtered_kolon_sum", "data"),
     State("kolon_sum", "data"),
     State("filtered_kolon_list", "data"),
     State("kolon_list", "data"),
     State("filtered_kolon_sumb", "data"),
     State("kolon_sumb", "data"),
-    State('unit-checkbox', 'value'),
     State("table_name", "data"),
     State("capacity_table_name", "data"),
 )
 def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
                                       selected_year,
+                                      selected_units,
                                       kolon_sum_filtered, kolon_sum_raw,
                                       kolon_list_filtered, kolon_list_raw,
                                       kolon_sumb_filtered, kolon_sumb_raw,
-                                      selected_units,
                                       table_name, capacity_table_name):
     # selected_year sadece callback tetiklemek için; gerçek içerik filtered_kolon_* ile geliyor.
     _ = selected_year
@@ -2999,8 +3070,8 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
         if sum_df is None or sum_df.empty or sum_df_cap_work is None or sum_df_cap_work.empty:
             return [], [], []
 
-        # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
-        sum_df = sum_df.round(0)
+        sum_numeric_cols = [c for c in sum_df.columns if c not in ("STAND", "STAT")]
+        _format_numeric_cols_by_unit(sum_df, sum_numeric_cols, selected_units)
         sum_df['STAT'] = 'Kapasite İhtiyacı'
         weeks = [col for col in kolon_list if col in sum_df.columns]
         if not weeks:
@@ -3011,7 +3082,8 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
             sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 60
         elif 'shifts' in (selected_units or []):
             sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 510
-        sum_df_cap_work = sum_df_cap_work.round(0)
+        cap_work_numeric_cols = [c for c in sum_df_cap_work.columns if c not in ("STAND",)]
+        _format_numeric_cols_by_unit(sum_df_cap_work, cap_work_numeric_cols, selected_units)
 
         toplam_row = {'STAT': 'Toplam Kapasite'}
         toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
@@ -3049,25 +3121,20 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
                 doluluk_vals.append(0)
         doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks)
         doluluk_df['STAT'] = 'Doluluk Oranı(%)'
-        # Saat/Vardiyada da dakika gibi 0 ondalık
-        doluluk_df = doluluk_df.round(0)
+        doluluk_df = doluluk_df.round(_unit_decimals(selected_units))
 
         # Prepare final DataFrame and format for display
-        # Seçenek B: Saat/Vardiya da dakika gibi int görünsün.
-        cap_df = cap_df.round(0)
+        _format_numeric_cols_by_unit(cap_df, [c for c in cap_df.columns if c != "STAT"], selected_units)
 
         cap_df_prepared = pd.concat([cap_df, doluluk_df], ignore_index=True)
 
-        # Float kalıp DataTable'da ".0" göstermesin diye kolonları int'e zorlayalım.
-        cap_df_prepared[weeks] = cap_df_prepared[weeks].round(0).astype("Int64")
+        _format_numeric_cols_by_unit(cap_df_prepared, weeks, selected_units)
 
-        # Doluluk satırı her zaman 0 ondalık görünsün
         dol_mask = cap_df_prepared['STAT'] == 'Doluluk Oranı(%)'
         if dol_mask.any():
             cap_df_prepared.loc[dol_mask, weeks] = (
                 cap_df_prepared.loc[dol_mask, weeks]
-                .round(0)
-                .astype("Int64")
+                .round(_unit_decimals(selected_units))
             )
         # Convert to records and coerce formatted strings to numeric types
         cap_records = cap_df_prepared.to_dict('records')
@@ -3081,14 +3148,29 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
             {'if': {'row_index': 'odd'},  'backgroundColor': '#eef4ff'},
             {'if': {'row_index': 'even'}, 'backgroundColor': '#ffffff'},
         ]
-        for col in weeks:
-            # Numeric comparisons: negative values and zero
-            sdc.append({'if': {'filter_query': f'{{{col}}} < 0', 'column_id': col},
-                        'backgroundColor': '#dc2626', 'color': '#ffffff', 'fontWeight': '700'})
-            sdc.append({'if': {'filter_query': f'{{{col}}} = 0', 'column_id': col}, 'color': '#bbbbbb'})
-            # Doluluk Oranı > 100 → kırmızı arka plan
-            sdc.append({'if': {'filter_query': f'{{STAT}} = "Doluluk Oranı(%)" && {{{col}}} >= 100', 'column_id': col},
-                        'backgroundColor': '#dc2626', 'color': '#ffffff', 'fontWeight': '700'})
+        # 1. accordion kapasite tablosu için deterministik hücre bazlı koşul.
+        for ridx, rec in enumerate(cap_records):
+            is_doluluk_row = str(rec.get('STAT') or '').strip() == 'Doluluk Oranı(%)'
+            for col in weeks:
+                v = rec.get(col)
+                if v is None:
+                    continue
+                try:
+                    fv = float(v)
+                except Exception:
+                    continue
+                if fv < 0 or (is_doluluk_row and fv >= 100):
+                    sdc.append({
+                        'if': {'row_index': ridx, 'column_id': col},
+                        'backgroundColor': '#dc2626',
+                        'color': '#ffffff',
+                        'fontWeight': '700',
+                    })
+                elif fv == 0:
+                    sdc.append({
+                        'if': {'row_index': ridx, 'column_id': col},
+                        'color': '#bbbbbb',
+                    })
         sdc.extend(_fixed_pin_style_data_overrides(['STAT']))
 
         # Debugging: print sample rows and style rules to server log

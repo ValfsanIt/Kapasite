@@ -12,15 +12,18 @@ if not exist "venv\Scripts\python.exe" (
 
 if not exist "logs" mkdir "logs"
 
-rem HIZLI TEST MODU kapali (tum costcenter)
+rem Uretimde her zaman tum costcenter (HEPSI) calissin.
+rem Ortamda daha once KAP_REPORT_SINGLE_CC tanimliysa burada sifirlanir.
+set "KAP_REPORT_SINGLE_CC="
 
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TS=%%i"
 set "LOG_FILE=%ROOT%logs\report_job_%TS%.log"
 
 echo [run_report_job] Basladi: %DATE% %TIME%
-echo [run_report_job] Log: %LOG_FILE%
+echo [run_report_job] Log kapali. Cikti terminalde gosterilecek.
+set "PYTHONUNBUFFERED=1"
 
-"venv\Scripts\python.exe" "report_job.py" >> "%LOG_FILE%" 2>&1
+"venv\Scripts\python.exe" -u "report_job.py"
 set "ERR=%ERRORLEVEL%"
 
 if "%ERR%"=="0" (

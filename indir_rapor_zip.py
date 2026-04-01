@@ -38,11 +38,36 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="ZIP dosya yolu (verilmezse KAP_RAPOR_OUT veya proje kökünde kapasite_raporlar.zip)",
     )
+    parser.add_argument(
+        "--single-cc",
+        dest="single_cc",
+        default=None,
+        help="Sadece tek costcenter uret. Deger: AUTO veya costcenter adi (ornek: KURUTMA).",
+    )
+    parser.add_argument(
+        "--all-cc",
+        dest="all_cc",
+        action="store_true",
+        help="Tum costcenter'lari uret (single-cc ayarini gecersiz kil).",
+    )
     args = parser.parse_args(argv)
 
     if ag is None:
         print("Hata: agent kullanılamıyor (run/agent veya pyodbc kontrol edin).", file=sys.stderr)
         return 1
+
+    # Hizli test modu: tek costcenter (AUTO => ilk bulunan CC)
+    env_single_cc = (os.environ.get("KAP_REPORT_SINGLE_CC") or "").strip()
+    single_cc = (args.single_cc or env_single_cc).strip() if (args.single_cc or env_single_cc) else ""
+    if args.all_cc:
+        raporlama.RAPORLAMA_SINGLE_COSTCENTER = None
+        print("[Kapasite] Mod: Tum costcenter", flush=True)
+    elif single_cc:
+        raporlama.RAPORLAMA_SINGLE_COSTCENTER = "__AUTO__" if single_cc.lower() == "auto" else single_cc
+        print(f"[Kapasite] Mod: Tek costcenter ({raporlama.RAPORLAMA_SINGLE_COSTCENTER})", flush=True)
+    else:
+        raporlama.RAPORLAMA_SINGLE_COSTCENTER = None
+        print("[Kapasite] Mod: Tum costcenter", flush=True)
 
     out = (args.output or os.environ.get("KAP_RAPOR_OUT") or "").strip()
     if not out:
