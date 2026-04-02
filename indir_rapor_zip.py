@@ -1,18 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Dashboard olmadan kapasite rapor ZIP'ini üretir ve diske yazar.
 
-Kullanım:
-  python indir_rapor_zip.py
-  python indir_rapor_zip.py C:\\Users\\ben\\Desktop\\rapor.zip
-
-Çıktı yolu ortam değişkeni ile de verilebilir:
-  set KAP_RAPOR_OUT=C:\\yol\\kapasite_raporlar.zip
-  python indir_rapor_zip.py
-
-Gereksinim: pyodbc + SQL Server ODBC sürücüsü, config.py bağlantı bilgileri.
-"""
 
 from __future__ import annotations
 

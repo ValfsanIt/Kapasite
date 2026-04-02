@@ -79,14 +79,14 @@ def _rapor_profile_enabled():
 
 
 def _sql_tables_guess(sql):
-    """Sorgudaki FROM/JOIN [Tablo] adları — süre dağılımı için kabaca gruplama."""
+    
     if not sql:
         return []
     return re.findall(r"(?:FROM|JOIN)\s+\[([^\]]+)\]", str(sql), flags=re.I)
 
 
 class _RunQueryProfiler:
-    """run.agent.run_query + Agent.run_query için geçici sarmalayıcı (SQL süresi toplar)."""
+    
 
     def __init__(self, state):
         self.state = state
@@ -97,13 +97,13 @@ class _RunQueryProfiler:
     def __enter__(self):
         import agent as ra  # type: ignore[reportMissingImports]
 
-        # Önceki sürümden kalan bozuk durumda (plain function) otomatik toparla.
+        
         if not isinstance(ra.Agent.__dict__.get("run_query"), staticmethod):
             ra.Agent.run_query = staticmethod(ra.run_query)
 
         self._mod = ra
         self._orig_fn = ra.run_query
-        # Class __dict__ içindeki staticmethod sarmalını bozmadan sakla.
+        
         orig_agent_attr = ra.Agent.__dict__.get("run_query")
         if isinstance(orig_agent_attr, staticmethod):
             self._orig_agent_rq_fn = orig_agent_attr.__func__
@@ -191,12 +191,7 @@ def _print_rapor_timing_report(zip_wall_sec, prof, per_excel_rows):
 
 
 def _send_report_notification_email(status, detail, created_reports=None, attachment_bytes=None, attachment_name="kapasite_raporlar.zip"):
-    """Raporlama işlem sonucu için e-posta bildirimi gönderir.
-
-    Varsayılan: Windows Outlook oturumundan (şifresiz) göndermeyi dener.
-    Outlook yoksa/çalışmazsa SMTP'ye düşer.
-    status: "BASARILI" | "BASARISIZ"
-    """
+    
     created_reports = created_reports or []
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     subject = f"Kapasite Raporlama - {status}"
@@ -531,12 +526,19 @@ def _parse_cell_to_float(val):
     
     if val is None:
         return None
+    if isinstance(val, bool):
+        return None
     try:
         if pd.isna(val):
             return None
     except (TypeError, ValueError):
         pass
-    if isinstance(val, (int, float)) and not isinstance(val, bool):
+    try:
+        if pd.api.types.is_number(val):
+            return float(val)
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, (int, float)):
         return float(val)
     s = str(val).strip().replace(".", "").replace(",", ".")
     try:
@@ -580,21 +582,30 @@ def _format_capacity_number(num_val, col_name, selected_units):
     x = float(num_val)
     if pd.isna(x):
         return None
-    dec = 0 if str(col_name).strip().endswith("A") else _unit_decimals(selected_units)
-    y = round(x, dec)
+    su = selected_units or []
+    if str(col_name).strip().endswith("A"):
+        y = round(x, 0)
+        if y == 0:
+            return None
+        return int(y)
+    if "hours" in su or "shifts" in su:
+        if x == 0:
+            return None
+        return round(x, kapasite_data.DISPLAY_MAX_DECIMALS_NON_A)
+    y = round(x, 0)
     if y == 0:
         return None
-    if dec == 0:
-        return int(y)
-    return y
+    return int(y)
 
 
 def _excel_number_format_for_capacity_col(col_name, selected_units):
-    """Kapasite kolonunun Excel gösterim formatını döndür."""
-    dec = 0 if str(col_name).strip().endswith("A") else _unit_decimals(selected_units)
-    if dec <= 0:
+    
+    if str(col_name).strip().endswith("A"):
         return "0"
-    return "0." + ("0" * dec)
+    su = selected_units or []
+    if "hours" in su or "shifts" in su:
+        return "0." + ("#" * kapasite_data.DISPLAY_MAX_DECIMALS_NON_A)
+    return "0"
 
 
 def _excel_safe_value(val):
@@ -733,10 +744,7 @@ def _merge_section_title_row(ws, row, s, end_col=3):
 
 
 def _write_detail_block_anchor_row(ws, row, text, s, merge_end_col=3):
-    """
-    Grup açıldığında Kapasite/Malzeme'nin hemen üstünde görünen çapa satırı.
-    (Üstteki özet satırı + mini tablo kaydırıldığında kullanıcı hangi WC'de olduğunu kaybetmesin.)
-    """
+    
     from openpyxl.styles import Alignment
     c = ws.cell(row=row, column=1, value=text)
     c.font = s["detail_anchor_font"]
@@ -798,10 +806,7 @@ def _extract_kumulatif_row_from_cap_df(cap_df, costcenter, workcenter="Tümü", 
 
 
 def _build_cumulative_ratio_from_cap_df(cap_df):
-    """
-    Kapasite Süresi tablosundan (STAT satırları) kümülatif ihtiyaç/kapasite ve oran üretir.
-    Oran = kümülatif_ihtiyaç / kümülatif_toplam_kapasite * 100
-    """
+    
     if cap_df is None or cap_df.empty or "STAT" not in cap_df.columns:
         return None, None, None, None
 
@@ -846,11 +851,7 @@ def _build_cumulative_ratio_from_cap_df(cap_df):
 
 
 def _prefix_col_count_before_weeks(cap_df):
-    """
-    Kapasite DataFrame'de ilk gerçek hafta/ay kolonundan önce kaç kolon var (STAT, 0, vb.).
-    _build_cumulative_ratio_from_cap_df ile aynı 'hafta' tanımı: STAT değil, tarih biçimi,
-    kolon adı '0' değil (hizalama sütunu).
-    """
+    
     if cap_df is None or cap_df.empty:
         return 1
     for i, c in enumerate(cap_df.columns):
@@ -861,7 +862,7 @@ def _prefix_col_count_before_weeks(cap_df):
 
 
 def _apply_rect_outer_border(ws, r1, r2, c1, c2, outer_side):
-    """Dikdörtgenin dış kenarına kalın çizgi; iç kenarları mümkün olduğunca korur."""
+    
     from openpyxl.styles import Border
 
     for r in range(r1, r2 + 1):
@@ -886,11 +887,7 @@ def _write_cumulative_mini_table(
     merge_end_col=3,
     right_edge_col=18,
 ):
-    """
-    Hepsi/WC başlığının sağında: D sütunu gutter (ayırıcı), özet bloğu sağa yaslı tek renk kart.
-    Ön ek sütun sayısı cap_df'ten dinamik (STAT, 0, …); hafta sütunları alt Kapasite Süresi ile hizalı.
-    Dönüş: Kapasite/Malzeme tablolarının yazılmaya başlanacağı satır.
-    """
+    
     from openpyxl.styles import Alignment, PatternFill
     from openpyxl.utils import get_column_letter
 
@@ -900,15 +897,14 @@ def _write_cumulative_mini_table(
 
     prefix_cols = _prefix_col_count_before_weeks(cap_df)
 
-    # Mini özetin hafta sütunları, alttaki Kapasite Süresi tablosu ile aynı Excel kolonunda olsun.
-    # Böylece 2026-14, 2026-15 ... başlıkları tam dikey hizalı görünür.
+    
     week_positions = {}
     for idx, c in enumerate(cap_df.columns, start=1):
         cs = str(c).strip() if c is not None else ""
         if cs != "STAT" and _is_date_col(c) and cs != "0":
             week_positions[cs] = idx
 
-    # Eğer kolon haritası çıkmazsa güvenli fallback
+    
     if len(week_positions) != len(cols):
         first_data_col = 1 + prefix_cols
         data_positions = [first_data_col + i for i in range(len(cols))]
@@ -919,8 +915,7 @@ def _write_cumulative_mini_table(
     label_col = max(1, first_data_col - prefix_cols)
     last_data_col = max(data_positions) if data_positions else first_data_col
 
-    # Grup başlığı satırını (Hepsi / WC adı) ezmeyelim; mini özeti bir alt satırdan başlat.
-    # Böylece Excel outline +/- kontrolü grup başlığıyla daha doğal eşleşir.
+    
     start_row = header_row + 1
 
     def _outline0(r):
@@ -1085,11 +1080,7 @@ def _write_kumulatif_table_to_sheet(ws, start_row, df, s, selected_units=None):
 
 
 def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=False, cc_index=None, section_index=None, selected_units=None):
-    """
-    DataFrame'i Excel sayfasına profesyonel stille yazar.
-    cc_index: cost center başlığı rengi (her CC farklı renk).
-    section_index: Hepsi / WC gibi alt başlık rengi.
-    """
+    
     def _title_fill():
         if is_section_title and cc_index is not None and "cc_title_fills" in s:
             return s["cc_title_fills"][cc_index % len(s["cc_title_fills"])]
@@ -1155,10 +1146,10 @@ def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=Fal
             if is_capacity_table and c_idx > 1:
                 num_val = _parse_cell_to_float(val)
                 if num_val is not None:
-                    col_name = df.columns[c_idx - 1]
-                    write_val = _format_capacity_number(num_val, col_name, selected_units)
+                     
+                    write_val = None if num_val == 0 else num_val
                 else:
-                    write_val = val
+                    write_val = _excel_safe_value(val)
             elif c_idx > 1:
                 col_name = df.columns[c_idx - 1]
                 if _is_date_col(col_name):
@@ -1171,9 +1162,9 @@ def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=Fal
                 else:
                     write_val = _display_blank_if_zero(val)
             cell = ws.cell(row=row, column=c_idx, value=_excel_safe_value(write_val))
-            if c_idx > 1 and num_val is not None:
+            if c_idx > 1 and write_val is not None:
                 col_name = df.columns[c_idx - 1]
-                if _is_date_col(col_name):
+                if is_capacity_table or _is_date_col(col_name):
                     cell.number_format = _excel_number_format_for_capacity_col(col_name, selected_units)
 
             # Temel stil
@@ -1469,7 +1460,13 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
             selected_units=selected_units,
         )
         malz_hepsi = kapasite_data.build_malzeme_table_for_cc(
-            ag, table_name, cc, columns_dict["format2"], selected_units, for_report=True
+            ag,
+            table_name,
+            cc,
+            kolon_sum,
+            selected_units,
+            for_report=True,
+            kolon_list=week_cols,
         )
         malz_hepsi = _reorder_malzeme_columns_for_report(malz_hepsi, week_cols)
         malz_hepsi = _apply_export_columns(malz_hepsi, hidden_columns, table_columns, table_name)
@@ -1522,7 +1519,14 @@ def _build_rapor_excel(costcenters, table_name, capacity_table_name, columns_dic
                 selected_units=selected_units,
             )
             malz_wc = kapasite_data.build_malzeme_table_for_cc_workcenter(
-                ag, table_name, cc, wc, columns_dict["format2"], selected_units, for_report=True
+                ag,
+                table_name,
+                cc,
+                wc,
+                kolon_sum,
+                selected_units,
+                for_report=True,
+                kolon_list=week_cols,
             )
             malz_wc = _reorder_malzeme_columns_for_report(malz_wc, week_cols)
             malz_wc = _apply_export_columns(malz_wc, hidden_columns, table_columns, table_name)
@@ -1682,6 +1686,7 @@ def build_raporlama_zip(ag_instance, hidden_columns=None, table_columns=None):
     
     if ag_instance is None:
         return None, []
+    # Dash'ta "Saat" seçili kapasite tablolarıyla birebir hizalı üretim (ZIP job varsayılanı).
     selected_units = ["hours"]
     zip_buffer = io.BytesIO()
     created = []

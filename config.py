@@ -27,15 +27,14 @@ else:
     mail_port = 25
     SMTP_USE_STARTTLS = False
     SMTP_REQUIRE_AUTH = False
-    # Gönderici (From) — auth kapalıyken yalnızca raporlama.py içindeki From alanı için kullanılır
+    
     SMTP_USERNAME = "canias@valfsan.com.tr"
     SMTP_PASSWORD = ""
 
-# Raporlama e-posta alıcıları (çoklu destek)
-# İleride kişi eklenecekse sadece bu listeleri güncellemeniz yeterli.
-RAPORLAMA_NOTIFY_TO = ["dayyildiz@valfsan.com.tr"]
-RAPORLAMA_NOTIFY_CC = ["itstajyer@valfsan.com.tr"]
-RAPORLAMA_NOTIFY_BCC = []
+
+RAPORLAMA_NOTIFY_TO = ["dayyildiz@valfsan.com.tr","itstajyer@valfsan.com.tr"]
+RAPORLAMA_NOTIFY_CC = []
+
 
 
 
@@ -43,7 +42,7 @@ reengen_username = "takgun@valfsan.com.tr"
 reengen_password = '1234Ta1234'
 reengen_company = 'valfsan'
 
-# Project root directory (this repository). Using a dynamic path avoids machine-specific absolute paths.
+
 
 project_directory = os.path.dirname(os.path.abspath(__file__))
 

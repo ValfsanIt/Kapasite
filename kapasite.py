@@ -328,20 +328,40 @@ def _is_a_col(col_name):
 
 
 def _format_numeric_cols_by_unit(df, numeric_cols, selected_units):
-    """Saat: 1, Vardiya: 2, Dakika: 0; A kolonları her zaman int."""
+    """kapasite_data._format_numeric_cols_by_unit ile aynı kurallar (tek kaynak sabiti)."""
     if df is None or df.empty or not numeric_cols:
         return df
     base_dec = _unit_decimals(selected_units)
+    su = selected_units or []
+    float_non_a = base_dec > 0 and ("hours" in su or "shifts" in su)
+    dmax = kapasite_data.DISPLAY_MAX_DECIMALS_NON_A
     for col in numeric_cols:
         if col not in df.columns:
             continue
         ser = pd.to_numeric(df[col], errors="coerce")
-        dec = 0 if _is_a_col(col) else base_dec
-        ser = ser.round(dec)
-        if dec == 0:
-            ser = ser.astype("Int64")
-        df[col] = ser
+        if _is_a_col(col):
+            df[col] = ser.round(0).astype("Int64")
+        elif float_non_a:
+            df[col] = ser.round(dmax)
+        else:
+            df[col] = ser.round(0).astype("Int64")
     return df
+
+
+def _week_pivot_numeric_values(week_names, values, selected_units):
+    """Grafik pivotu: …A tam sayı; saat/vardiyada diğer haftalar en fazla DISPLAY_MAX_DECIMALS_NON_A ondalık."""
+    ser = pd.to_numeric(values, errors="coerce")
+    su = selected_units or []
+    dmax = kapasite_data.DISPLAY_MAX_DECIMALS_NON_A
+    if "hours" not in su and "shifts" not in su:
+        return ser.round(0)
+    mask_a = week_names.map(
+        lambda c: _is_a_col(c) if c is not None and pd.notna(c) else False
+    )
+    result = ser.astype("float64")
+    result.loc[mask_a] = ser.loc[mask_a].round(0)
+    result.loc[~mask_a] = ser.loc[~mask_a].round(dmax)
+    return result
 
 
 def format_with_thousands_separator(df, kolonlar):
@@ -2319,8 +2339,9 @@ def update_capacity_and_workcenter_dropdowns(selected_costcenter, kolon_sum_filt
         return options_list_cap, empty_fig, options_workcenter, 'Hepsi'
 
     pivot_df_fig = pd.melt(sum_df_fig, id_vars=['STAND'], var_name='current_week', value_name='value_min')
-    pivot_df_fig['value_min'] = pd.to_numeric(pivot_df_fig['value_min'], errors='coerce')
-    pivot_df_fig['value_min'] = pivot_df_fig['value_min'].round(_unit_decimals(selected_units))
+    pivot_df_fig['value_min'] = _week_pivot_numeric_values(
+        pivot_df_fig['current_week'], pivot_df_fig['value_min'], selected_units
+    )
 
 
 
@@ -2500,17 +2521,36 @@ def update_workcenter(selected_workcenter, selected_capgrup,
 
    
     try:
-        mat_sql = f"SELECT MATERIAL, DRAWNUM, {sum_select} FROM [{table_name}] WHERE {where_base} GROUP BY MATERIAL, DRAWNUM ORDER BY MATERIAL, DRAWNUM"
-        mat_df = ag.run_query(mat_sql)
-        if mat_df is None or (hasattr(mat_df, 'empty') and mat_df.empty):
+        if not selected_workcenter or selected_workcenter == "Hepsi":
+            mat_df = kapasite_data.build_malzeme_table_for_cc(
+                ag,
+                table_name,
+                selected_costcenter,
+                kolon_sum_str,
+                selected_units,
+                for_report=False,
+                kolon_list=kolon_list,
+                cap_grp=selected_capgrup,
+            )
+        else:
+            mat_df = kapasite_data.build_malzeme_table_for_cc_workcenter(
+                ag,
+                table_name,
+                selected_costcenter,
+                selected_workcenter,
+                kolon_sum_str,
+                selected_units,
+                for_report=False,
+                kolon_list=kolon_list,
+                cap_grp=selected_capgrup,
+            )
+        if mat_df is None or (hasattr(mat_df, "empty") and mat_df.empty):
             mat_data, mat_cols, mat_style = [], [], []
         else:
-            mat_numeric_cols = [c for c in mat_df.columns if c not in ("MATERIAL", "DRAWNUM")]
-            _format_numeric_cols_by_unit(mat_df, mat_numeric_cols, selected_units)
-            filtered_cols = ['MATERIAL', 'DRAWNUM'] + [c for c in kolon_list if c in mat_df.columns]
+            filtered_cols = ["MATERIAL", "DRAWNUM"] + [c for c in kolon_list if c in mat_df.columns]
             mat_df = mat_df[[c for c in filtered_cols if c in mat_df.columns]]
 
-            mat_data = mat_df.to_dict('records')
+            mat_data = mat_df.to_dict("records")
             mat_numeric_cols = [c for c in kolon_list if c in mat_df.columns]
             _coerce_numeric_records(mat_data, mat_numeric_cols)
             _blank_zero_cells_in_records(mat_data, mat_numeric_cols)
@@ -2538,100 +2578,38 @@ def update_workcenter(selected_workcenter, selected_capgrup,
             kolon_sumb_str = kolon_sumb if isinstance(kolon_sumb, str) else (", ".join(kolon_sumb) if isinstance(kolon_sumb, list) else None)
             if not kolon_sumb_str:
                 kolon_sumb_str = generate_weekly_columns()['format1']
-            ihtiyac_select = _select_sum_with_unit(kolon_list, selected_units) or kolon_sum_str
-
-            # Kapasite İhtiyacı (birim SELECT içinde)
             if not selected_workcenter or selected_workcenter == 'Hepsi':
-                if not selected_capgrup or selected_capgrup == 'Kapasite Grubu':
-                    ihtiyac_sql = f"SELECT STAND,{ihtiyac_select} FROM {table_name} WHERE STAND = '{selected_costcenter}' GROUP BY STAND ORDER BY STAND"
-                    cap_work_sql = f"SELECT {kolon_sumb_str} FROM (SELECT STAND,CAPWORK FROM {table_name} GROUP BY CAPWORK,STAND) A LEFT JOIN {capacity_table_name} B ON A.CAPWORK = B.WORKCENTER WHERE A.STAND = '{selected_costcenter}' GROUP BY A.STAND"
-                else:
-                    ihtiyac_sql = f"SELECT STAND,{ihtiyac_select} FROM {table_name} WHERE STAND = '{selected_costcenter}' AND CAPGRUP = '{selected_capgrup}' GROUP BY STAND ORDER BY STAND"
-                    cap_work_sql = f"SELECT {kolon_sumb_str} FROM (SELECT STAND,CAPWORK,CAPGRUP FROM {table_name} GROUP BY CAPWORK,STAND,CAPGRUP) A LEFT JOIN {capacity_table_name} B ON A.CAPWORK = B.WORKCENTER WHERE A.STAND = '{selected_costcenter}' AND A.CAPGRUP = '{selected_capgrup}' GROUP BY A.STAND,A.CAPGRUP"
+                cap_df_wc = kapasite_data.build_capacity_table_for_cc(
+                    ag,
+                    table_name,
+                    capacity_table_name,
+                    selected_costcenter,
+                    kolon_sum_str,
+                    kolon_sumb_str,
+                    kolon_list,
+                    selected_units,
+                    cap_grp=selected_capgrup,
+                )
             else:
-                if not selected_capgrup or selected_capgrup == 'Kapasite Grubu':
-                    ihtiyac_sql = f"SELECT CAPWORK,{ihtiyac_select} FROM {table_name} WHERE STAND = '{selected_costcenter}' AND CAPWORK = '{selected_workcenter}' GROUP BY CAPWORK ORDER BY CAPWORK"
-                    cap_work_sql = f"SELECT {kolon_sumb_str} FROM (SELECT STAND,CAPWORK FROM {table_name} GROUP BY CAPWORK,STAND) A LEFT JOIN {capacity_table_name} B ON A.CAPWORK = B.WORKCENTER WHERE A.STAND = '{selected_costcenter}' AND A.CAPWORK = '{selected_workcenter}' GROUP BY A.STAND,A.CAPWORK"
-                else:
-                    ihtiyac_sql = f"SELECT CAPWORK,{ihtiyac_select} FROM {table_name} WHERE STAND = '{selected_costcenter}' AND CAPGRUP = '{selected_capgrup}' AND CAPWORK = '{selected_workcenter}' GROUP BY CAPWORK ORDER BY CAPWORK"
-                    cap_work_sql = f"SELECT {kolon_sumb_str} FROM (SELECT STAND,CAPWORK,CAPGRUP FROM {table_name} GROUP BY CAPWORK,STAND,CAPGRUP) A LEFT JOIN {capacity_table_name} B ON A.CAPWORK = B.WORKCENTER WHERE A.STAND = '{selected_costcenter}' AND A.CAPGRUP = '{selected_capgrup}' AND A.CAPWORK = '{selected_workcenter}' GROUP BY A.STAND,A.CAPGRUP"
+                cap_df_wc = kapasite_data.build_capacity_table_for_cc_workcenter(
+                    ag,
+                    table_name,
+                    capacity_table_name,
+                    selected_costcenter,
+                    selected_workcenter,
+                    kolon_sum_str,
+                    kolon_sumb_str,
+                    kolon_list,
+                    selected_units,
+                    cap_grp=selected_capgrup,
+                )
 
-            sum_df_ihtiyac  = ag.run_query(ihtiyac_sql)
-            sum_df_cap_work = ag.run_query(cap_work_sql)
-
-            if (sum_df_ihtiyac is not None and not sum_df_ihtiyac.empty and
-                    sum_df_cap_work is not None and not sum_df_cap_work.empty):
-
-                sum_df_ihtiyac['STAT'] = 'Kapasite İhtiyacı'
-                need_numeric_cols = [c for c in sum_df_ihtiyac.columns if c not in ("STAND", "CAPWORK", "STAT")]
-                _format_numeric_cols_by_unit(sum_df_ihtiyac, need_numeric_cols, selected_units)
-                weeks_cap = [col for col in kolon_list if col in sum_df_ihtiyac.columns]
+            if cap_df_wc is None or cap_df_wc.empty:
+                cap_data, cap_cols_def, cap_wc_style = [], [], []
+            else:
+                weeks_cap = [col for col in kolon_list if col in cap_df_wc.columns]
                 if not weeks_cap:
-                    weeks_cap = [c for c in sum_df_ihtiyac.columns if c not in (sum_df_ihtiyac.columns[0], 'STAT')]
-                filtered_ihtiyac = sum_df_ihtiyac[['STAT'] + weeks_cap].copy()
-
-                if 'hours' in (selected_units or []):
-                    sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 60
-                elif 'shifts' in (selected_units or []):
-                    sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 510
-                cap_work_numeric_cols = [c for c in sum_df_cap_work.columns if c not in ("STAND", "CAPWORK")]
-                _format_numeric_cols_by_unit(sum_df_cap_work, cap_work_numeric_cols, selected_units)
-
-                toplam_row = {'STAT': 'Toplam Kapasite'}
-                toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
-                cap_df_wc = pd.concat([filtered_ihtiyac, pd.DataFrame([toplam_row])], ignore_index=True)
-
-                # Kapasite Farkı
-                fark_row = {'STAT': 'Kapasite Farkı'}
-                for col in weeks_cap:
-                    try:
-                        fark_row[col] = round(
-                            float(cap_df_wc.loc[cap_df_wc['STAT'] == 'Toplam Kapasite', col].iloc[0]) -
-                            float(cap_df_wc.loc[cap_df_wc['STAT'] == 'Kapasite İhtiyacı', col].iloc[0]),
-                            0)
-                    except Exception:
-                        fark_row[col] = 0
-                cap_df_wc = pd.concat([cap_df_wc, pd.DataFrame([fark_row])], ignore_index=True)
-
-                # Kümülatif Toplam
-                numeric_cols_wc = [c for c in cap_df_wc.columns if c != 'STAT']
-                cumsum_wc = cap_df_wc.loc[cap_df_wc['STAT'] == 'Kapasite Farkı', numeric_cols_wc].cumsum(axis=1)
-                cum_row = {'STAT': 'Kümülatif Toplam'}
-                cum_row.update(cumsum_wc.iloc[0].to_dict())
-                cum_row = {k: round(v, 0) if isinstance(v, (int, float)) else v for k, v in cum_row.items()}
-                cap_df_wc = pd.concat([cap_df_wc, pd.DataFrame([cum_row])], ignore_index=True)
-
-                # Doluluk Oranı (%) — sayısal tutulur, > 100 filter_query için
-                doluluk_vals = []
-                ui_row = cap_df_wc[cap_df_wc['STAT'] == 'Kapasite İhtiyacı'].iloc[0]
-                tk_row = cap_df_wc[cap_df_wc['STAT'] == 'Toplam Kapasite'].iloc[0]
-                for col in weeks_cap:
-                    try:
-                        tk_val = float(tk_row[col])
-                        ui_val = float(ui_row[col])
-                        # Doluluk Oranı(%) dakikadaki gibi 0 ondalık ve int görünsün
-                        doluluk_vals.append(round((ui_val / tk_val) * 100, 0) if tk_val != 0 else 0)
-                    except Exception:
-                        doluluk_vals.append(0)
-                doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks_cap)
-                doluluk_df['STAT'] = 'Doluluk Oranı(%)'
-                doluluk_df = doluluk_df.round(_unit_decimals(selected_units))
-
-                
-                cap_df_wc = pd.concat([cap_df_wc, doluluk_df], ignore_index=True)
-                for col in weeks_cap:
-                    cap_df_wc[col] = pd.to_numeric(cap_df_wc[col], errors='coerce')
-
-                _format_numeric_cols_by_unit(cap_df_wc, weeks_cap, selected_units)
-
-                dol_mask = cap_df_wc['STAT'] == 'Doluluk Oranı(%)'
-                if dol_mask.any():
-                    cap_df_wc.loc[dol_mask, weeks_cap] = (
-                        cap_df_wc.loc[dol_mask, weeks_cap]
-                        .round(_unit_decimals(selected_units))
-                    )
-
-                # Keep capacity numbers numeric so numeric style rules (>=100, <0) work
+                    weeks_cap = [c for c in cap_df_wc.columns if c != 'STAT']
                 cap_data = cap_df_wc.to_dict('records')
                 _coerce_numeric_records(cap_data, weeks_cap)
                 _blank_zero_cells_in_records(cap_data, weeks_cap)
@@ -2641,7 +2619,6 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                     {'if': {'row_index': 'odd'},  'backgroundColor': '#eef4ff'},
                     {'if': {'row_index': 'even'}, 'backgroundColor': '#ffffff'},
                 ]
-                # Filter parser farklılıklarına takılmamak için hücre bazlı (row_index + column_id) kural.
                 for ridx, rec in enumerate(cap_data):
                     is_doluluk_row = str(rec.get('STAT') or '').strip() == 'Doluluk Oranı(%)'
                     for col in weeks_cap:
@@ -2715,7 +2692,9 @@ def update_workcenter(selected_workcenter, selected_capgrup,
             if df_figx is not None and not (hasattr(df_figx, 'empty') and df_figx.empty) and len(df_figx) > 0:
                 pivot_figx = pd.melt(df_figx, id_vars=[id_var], var_name='hafta', value_name='deger')
                 pivot_figx['deger'] = pd.to_numeric(pivot_figx['deger'], errors='coerce').fillna(0)
-                pivot_figx['deger'] = pivot_figx['deger'].round(_unit_decimals(selected_units))
+                pivot_figx['deger'] = _week_pivot_numeric_values(
+                    pivot_figx['hafta'], pivot_figx['deger'], selected_units
+                )
 
                 if len(pivot_figx) > 0:
                     # Kırmızı (>100) / Mavi (<=100) renklendirme
@@ -3056,87 +3035,24 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
     kolon_list = kolon_list_str.split(', ') if kolon_list_str else []
 
     try:
-        ihtiyac_select = _select_sum_with_unit(kolon_list, selected_units) or kolon_sum
-        if not selected_capgrp or selected_capgrp == 'Kapasite Grubu':
-            ihtiyac_sql  = f"SELECT STAND,{ihtiyac_select} FROM [{table_name}] WHERE STAND = '{selected_costcenter}' GROUP BY STAND ORDER BY STAND"
-            cap_work_sql = f"SELECT {kolon_sumb} FROM (SELECT STAND,CAPWORK FROM [{table_name}] GROUP BY CAPWORK,STAND) A LEFT JOIN [{capacity_table_name}] B ON A.CAPWORK = B.WORKCENTER WHERE A.STAND = '{selected_costcenter}' GROUP BY A.STAND"
-        else:
-            ihtiyac_sql  = f"SELECT STAND,{ihtiyac_select} FROM [{table_name}] WHERE CAPGRUP = '{selected_capgrp}' AND STAND = '{selected_costcenter}' GROUP BY STAND ORDER BY STAND"
-            cap_work_sql = f"SELECT {kolon_sumb} FROM (SELECT STAND,CAPWORK,CAPGRUP FROM [{table_name}] GROUP BY CAPWORK,STAND,CAPGRUP) A LEFT JOIN [{capacity_table_name}] B ON A.CAPWORK = B.WORKCENTER WHERE A.STAND = '{selected_costcenter}' AND A.CAPGRUP = '{selected_capgrp}' GROUP BY A.STAND"
-
-        sum_df          = ag.run_query(ihtiyac_sql)
-        sum_df_cap_work = ag.run_query(cap_work_sql)
-
-        if sum_df is None or sum_df.empty or sum_df_cap_work is None or sum_df_cap_work.empty:
+        cap_df_prepared = kapasite_data.build_capacity_table_for_cc(
+            ag,
+            table_name,
+            capacity_table_name,
+            selected_costcenter,
+            kolon_sum,
+            kolon_sumb,
+            kolon_list,
+            selected_units,
+            cap_grp=selected_capgrp,
+        )
+        if cap_df_prepared is None or cap_df_prepared.empty:
             return [], [], []
 
-        sum_numeric_cols = [c for c in sum_df.columns if c not in ("STAND", "STAT")]
-        _format_numeric_cols_by_unit(sum_df, sum_numeric_cols, selected_units)
-        sum_df['STAT'] = 'Kapasite İhtiyacı'
-        weeks = [col for col in kolon_list if col in sum_df.columns]
+        weeks = [col for col in kolon_list if col in cap_df_prepared.columns]
         if not weeks:
-            weeks = [c for c in sum_df.columns if c not in ('STAND', 'STAT')]
-        filtered_sum_df = sum_df[['STAT'] + weeks].copy()
+            weeks = [c for c in cap_df_prepared.columns if c != "STAT"]
 
-        if 'hours' in (selected_units or []):
-            sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 60
-        elif 'shifts' in (selected_units or []):
-            sum_df_cap_work.iloc[:, 1:] = sum_df_cap_work.iloc[:, 1:] / 510
-        cap_work_numeric_cols = [c for c in sum_df_cap_work.columns if c not in ("STAND",)]
-        _format_numeric_cols_by_unit(sum_df_cap_work, cap_work_numeric_cols, selected_units)
-
-        toplam_row = {'STAT': 'Toplam Kapasite'}
-        toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
-        cap_df = pd.concat([filtered_sum_df, pd.DataFrame([toplam_row])], ignore_index=True)
-
-        fark_row = {'STAT': 'Kapasite Farkı'}
-        for col in weeks:
-            try:
-                fark_row[col] = round(
-                    float(cap_df.loc[cap_df['STAT'] == 'Toplam Kapasite', col].iloc[0]) -
-                    float(cap_df.loc[cap_df['STAT'] == 'Kapasite İhtiyacı', col].iloc[0]),
-                    0)
-            except Exception:
-                fark_row[col] = 0
-        cap_df = pd.concat([cap_df, pd.DataFrame([fark_row])], ignore_index=True)
-
-        numeric_cols = [c for c in cap_df.columns if c != 'STAT']
-        cumsum = cap_df.loc[cap_df['STAT'] == 'Kapasite Farkı', numeric_cols].cumsum(axis=1)
-        cum_row = {'STAT': 'Kümülatif Toplam'}
-        cum_row.update(cumsum.iloc[0].to_dict())
-        cum_row = {k: round(v, 0) if isinstance(v, (int, float)) else v for k, v in cum_row.items()}
-        cap_df = pd.concat([cap_df, pd.DataFrame([cum_row])], ignore_index=True)
-
-        # Doluluk Oranı (%) — sayısal tutulur, > 100 filter_query için
-        doluluk_vals = []
-        ui_row = cap_df[cap_df['STAT'] == 'Kapasite İhtiyacı'].iloc[0]
-        tk_row = cap_df[cap_df['STAT'] == 'Toplam Kapasite'].iloc[0]
-        for col in weeks:
-            try:
-                tk = float(tk_row[col])
-                ui = float(ui_row[col])
-                # Saat/Vardiya sonuçları dakika ile aynı tipte görünsün: 0 ondalık
-                doluluk_vals.append(round((ui / tk) * 100, 0) if tk != 0 else 0)
-            except Exception:
-                doluluk_vals.append(0)
-        doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks)
-        doluluk_df['STAT'] = 'Doluluk Oranı(%)'
-        doluluk_df = doluluk_df.round(_unit_decimals(selected_units))
-
-        # Prepare final DataFrame and format for display
-        _format_numeric_cols_by_unit(cap_df, [c for c in cap_df.columns if c != "STAT"], selected_units)
-
-        cap_df_prepared = pd.concat([cap_df, doluluk_df], ignore_index=True)
-
-        _format_numeric_cols_by_unit(cap_df_prepared, weeks, selected_units)
-
-        dol_mask = cap_df_prepared['STAT'] == 'Doluluk Oranı(%)'
-        if dol_mask.any():
-            cap_df_prepared.loc[dol_mask, weeks] = (
-                cap_df_prepared.loc[dol_mask, weeks]
-                .round(_unit_decimals(selected_units))
-            )
-        # Convert to records and coerce formatted strings to numeric types
         cap_records = cap_df_prepared.to_dict('records')
         _coerce_numeric_records(cap_records, weeks)
         _blank_zero_cells_in_records(cap_records, weeks)
@@ -3172,16 +3088,6 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
                         'color': '#bbbbbb',
                     })
         sdc.extend(_fixed_pin_style_data_overrides(['STAT']))
-
-        # Debugging: print sample rows and style rules to server log
-        try:
-            print("DEBUG update_costcenter_capacity_table: cap_df_prepared sample:", cap_df_prepared.head(3).to_dict('records'))
-        except Exception:
-            pass
-        try:
-            print("DEBUG update_costcenter_capacity_table: sdc sample:", sdc[:8])
-        except Exception:
-            pass
 
         return cap_records, cols, sdc
 
