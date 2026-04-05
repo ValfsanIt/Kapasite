@@ -32,8 +32,8 @@ else:
     SMTP_PASSWORD = ""
 
 
-RAPORLAMA_NOTIFY_TO = ["dayyildiz@valfsan.com.tr","itstajyer@valfsan.com.tr"]
-RAPORLAMA_NOTIFY_CC = []
+RAPORLAMA_NOTIFY_TO = ["dayyildiz@valfsan.com.tr","planlama@valfsan.com.tr"]
+RAPORLAMA_NOTIFY_CC = ["itstajyer@valfsan.com.tr"]
 
 
 

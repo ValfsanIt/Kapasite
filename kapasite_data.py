@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
 
 from datetime import datetime, timedelta
+import re
 import pandas as pd
 
 
-DISPLAY_MAX_DECIMALS_NON_A = 4
+
+DISPLAY_MAX_DECIMALS_NON_A = 2
+
+
+CAPACITY_DISPLAY_DEC_IHT_TOP_NON_A = 1
+CAPACITY_DISPLAY_DEC_FARK_CUM_NON_A = 1
+CAPACITY_DISPLAY_DEC_DOLULUK = 1
 
 
 def get_kolon_list_from_format3(format3_str):
@@ -114,13 +121,145 @@ def _format_numeric_cols_by_unit(df, numeric_cols, selected_units):
     return df
 
 
-def _finalize_capacity_stat_like_dash(cap_df, doluluk_df, weeks, selected_units):
+def _prepare_capacity_source_numbers(sum_df, id_cols, selected_units):
     
-    if cap_df is None or cap_df.empty or doluluk_df is None or doluluk_df.empty or not weeks:
-        return cap_df
-    _format_numeric_cols_by_unit(cap_df, [c for c in cap_df.columns if c != "STAT"], selected_units)
-    out = pd.concat([cap_df, doluluk_df], ignore_index=True)
-    _format_numeric_cols_by_unit(out, weeks, selected_units)
+    if sum_df is None or sum_df.empty:
+        return
+    su = selected_units or []
+    num = [c for c in sum_df.columns if c not in id_cols]
+    if "hours" not in su and "shifts" not in su:
+        _format_numeric_cols_by_unit(sum_df, num, selected_units)
+        return
+    for col in num:
+        if col not in sum_df.columns:
+            continue
+        ser = pd.to_numeric(sum_df[col], errors="coerce")
+        if _is_a_col(col):
+            sum_df[col] = ser.round(0).astype("Int64")
+        else:
+            sum_df[col] = ser.astype("float64")
+
+
+def _is_date_col_cap(col_name):
+    
+    c = str(col_name).strip()
+    if re.match(r"^\d{4}[-/W]\d{2}", c):
+        return True
+    if re.match(r"^W\d{1,2}$", c, re.IGNORECASE):
+        return True
+    if c == "0":
+        return True
+    return False
+
+
+def _float_cell(x):
+    if x is None:
+        return 0.0
+    try:
+        if pd.isna(x):
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+    try:
+        v = float(pd.to_numeric(x, errors="coerce"))
+        return 0.0 if pd.isna(v) else v
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_cumulative_mini_payload(cap_df):
+    
+    if cap_df is None or cap_df.empty or "STAT" not in cap_df.columns:
+        return None
+    week_cols = [
+        c for c in cap_df.columns
+        if c != "STAT" and _is_date_col_cap(c) and str(c).strip() != "0"
+    ]
+    if not week_cols:
+        return None
+    row_need = row_total = None
+    for _, r in cap_df.iterrows():
+        stat = str(r.get("STAT") or "").strip()
+        if stat == "Kapasite İhtiyacı":
+            row_need = r
+        elif stat == "Toplam Kapasite":
+            row_total = r
+    if row_need is None or row_total is None:
+        return None
+    base_need = 0.0
+    if "0" in cap_df.columns:
+        base_need = _float_cell(row_need.get("0"))
+    cum_need, cum_total, cum_ratio = [], [], []
+    running_need = base_need
+    running_total = 0.0
+    for col in week_cols:
+        running_need += _float_cell(row_need.get(col))
+        running_total += _float_cell(row_total.get(col))
+        cum_need.append(running_need)
+        cum_total.append(running_total)
+        cum_ratio.append(
+            (running_need / running_total * 100.0) if running_total else None
+        )
+    return {
+        "cols": list(week_cols),
+        "cum_need": cum_need,
+        "cum_total": cum_total,
+        "cum_ratio": cum_ratio,
+    }
+
+
+def filter_cumulative_mini_payload(payload, df_columns):
+    
+    if not payload or not isinstance(payload, dict):
+        return None, None, None, None
+    cols = payload.get("cols") or []
+    need = payload.get("cum_need") or []
+    tot = payload.get("cum_total") or []
+    rat = payload.get("cum_ratio") or []
+    if len(cols) != len(need) or len(need) != len(tot) or len(tot) != len(rat):
+        return None, None, None, None
+    idx = {c: i for i, c in enumerate(cols)}
+    keep = [c for c in cols if c in df_columns]
+    if not keep:
+        return None, None, None, None
+    return (
+        keep,
+        [need[idx[c]] for c in keep],
+        [tot[idx[c]] for c in keep],
+        [rat[idx[c]] for c in keep],
+    )
+
+
+def _apply_capacity_stat_display(out, weeks, selected_units):
+    
+    if out is None or out.empty or not weeks or "STAT" not in out.columns:
+        return out
+    su = selected_units or []
+    if "hours" not in su and "shifts" not in su:
+        return out
+    for idx in out.index:
+        stat = str(out.at[idx, "STAT"]).strip()
+        for col in weeks:
+            if col not in out.columns:
+                continue
+            v = out.at[idx, col]
+            try:
+                if pd.isna(v):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            fv = float(v)
+            if _is_a_col(col):
+                out.at[idx, col] = int(round(fv, 0))
+            elif stat == "Kapasite İhtiyacı" or stat == "Toplam Kapasite":
+                rv = round(fv, CAPACITY_DISPLAY_DEC_IHT_TOP_NON_A)
+                out.at[idx, col] = int(rv) if CAPACITY_DISPLAY_DEC_IHT_TOP_NON_A == 0 else rv
+            elif stat == "Kapasite Farkı" or stat == "Kümülatif Toplam":
+                rv = round(fv, CAPACITY_DISPLAY_DEC_FARK_CUM_NON_A)
+                out.at[idx, col] = int(rv) if CAPACITY_DISPLAY_DEC_FARK_CUM_NON_A == 0 else rv
+            elif stat == "Doluluk Oranı(%)":
+                rv = round(fv, CAPACITY_DISPLAY_DEC_DOLULUK)
+                out.at[idx, col] = int(rv) if CAPACITY_DISPLAY_DEC_DOLULUK == 0 else rv
     return out
 
 
@@ -326,7 +465,7 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
                 _div_safe(sum_df, 1, 510)
 
         sum_numeric = [c for c in sum_df.columns if c not in ("STAND",)]
-        _format_numeric_cols_by_unit(sum_df, sum_numeric, selected_units)
+        _prepare_capacity_source_numbers(sum_df, ("STAND",), selected_units)
 
         sum_df["STAT"] = "Kapasite İhtiyacı"
         weeks = [c for c in kolon_list if c in sum_df.columns]
@@ -337,24 +476,24 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         if sum_df_cap_work.shape[1] > 0:
             _apply_cap_work_unit_like_dash(sum_df_cap_work, selected_units)
             cap_work_numeric = [c for c in sum_df_cap_work.columns if c not in ("STAND",)]
-            _format_numeric_cols_by_unit(sum_df_cap_work, cap_work_numeric, selected_units)
+            _prepare_capacity_source_numbers(sum_df_cap_work, ("STAND",), selected_units)
 
         toplam_row = {"STAT": "Toplam Kapasite"}
         toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
         cap_df = pd.concat([filtered_sum_df, pd.DataFrame([toplam_row])], ignore_index=True)
 
-        fark_row = {"STAT": "Kapasite Farkı"}
         su = selected_units or []
-        sql_float_fark = _unit_decimals(selected_units) > 0 and ("hours" in su or "shifts" in su)
+        float_cap_mode = "hours" in su or "shifts" in su
+        fark_row = {"STAT": "Kapasite Farkı"}
         for col in weeks:
             try:
                 d = float(cap_df.loc[cap_df["STAT"] == "Toplam Kapasite", col].iloc[0]) - float(
                     cap_df.loc[cap_df["STAT"] == "Kapasite İhtiyacı", col].iloc[0]
                 )
-                if sql_float_fark and not _is_a_col(col):
-                    fark_row[col] = round(d, DISPLAY_MAX_DECIMALS_NON_A)
+                if _is_a_col(col):
+                    fark_row[col] = int(round(d, 0))
                 else:
-                    fark_row[col] = round(d, 0)
+                    fark_row[col] = d if float_cap_mode else int(round(d, 0))
             except Exception:
                 fark_row[col] = 0
         cap_df = pd.concat([cap_df, pd.DataFrame([fark_row])], ignore_index=True)
@@ -362,14 +501,11 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         numeric_cols = [c for c in cap_df.columns if c != "STAT"]
         cumsum = cap_df.loc[cap_df["STAT"] == "Kapasite Farkı", numeric_cols].cumsum(axis=1)
         cum_row = {"STAT": "Kümülatif Toplam"}
-        cum_raw = cumsum.iloc[0].to_dict()
-        cum_row.update(cum_raw)
-        for k, v in list(cum_row.items()):
-            if k == "STAT" or not isinstance(v, (int, float)):
-                continue
-            if sql_float_fark and not _is_a_col(k):
-                cum_row[k] = round(v, DISPLAY_MAX_DECIMALS_NON_A)
-            else:
+        cum_row.update(cumsum.iloc[0].to_dict())
+        if not float_cap_mode:
+            for k, v in list(cum_row.items()):
+                if k == "STAT" or not isinstance(v, (int, float)):
+                    continue
                 cum_row[k] = round(v, 0)
         cap_df = pd.concat([cap_df, pd.DataFrame([cum_row])], ignore_index=True)
 
@@ -380,12 +516,21 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
             try:
                 tk = float(tk_row[col])
                 ui = float(ui_row[col])
-                doluluk_vals.append(round((ui / tk) * 100, 0) if tk != 0 else 0)
+                if float_cap_mode:
+                    doluluk_vals.append((ui / tk) * 100 if tk != 0 else 0.0)
+                else:
+                    doluluk_vals.append(round((ui / tk) * 100, 0) if tk != 0 else 0)
             except Exception:
                 doluluk_vals.append(0)
         doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks)
         doluluk_df["STAT"] = "Doluluk Oranı(%)"
-        return _finalize_capacity_stat_like_dash(cap_df, doluluk_df, weeks, selected_units)
+        out = pd.concat([cap_df, doluluk_df], ignore_index=True)
+        try:
+            out.attrs["cumulative_mini"] = build_cumulative_mini_payload(out)
+        except Exception:
+            out.attrs["cumulative_mini"] = None
+        _apply_capacity_stat_display(out, weeks, selected_units)
+        return out
     except Exception as e:
         print(f"kapasite_data build_capacity_table_for_cc hatası: {e}")
         return None
@@ -448,7 +593,7 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
                 _div_safe(sum_df, 1, 510)
 
         sum_numeric = [c for c in sum_df.columns if c not in ("CAPWORK",)]
-        _format_numeric_cols_by_unit(sum_df, sum_numeric, selected_units)
+        _prepare_capacity_source_numbers(sum_df, ("CAPWORK",), selected_units)
 
         sum_df["STAT"] = "Kapasite İhtiyacı"
         weeks = [c for c in kolon_list if c in sum_df.columns]
@@ -459,24 +604,24 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         if sum_df_cap_work.shape[1] > 0:
             _apply_cap_work_unit_like_dash(sum_df_cap_work, selected_units)
             cap_work_numeric = [c for c in sum_df_cap_work.columns if c not in ("STAND", "CAPWORK")]
-            _format_numeric_cols_by_unit(sum_df_cap_work, cap_work_numeric, selected_units)
+            _prepare_capacity_source_numbers(sum_df_cap_work, ("STAND", "CAPWORK"), selected_units)
 
         toplam_row = {"STAT": "Toplam Kapasite"}
         toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
         cap_df = pd.concat([filtered_sum_df, pd.DataFrame([toplam_row])], ignore_index=True)
 
-        fark_row = {"STAT": "Kapasite Farkı"}
         su = selected_units or []
-        sql_float_fark = _unit_decimals(selected_units) > 0 and ("hours" in su or "shifts" in su)
+        float_cap_mode = "hours" in su or "shifts" in su
+        fark_row = {"STAT": "Kapasite Farkı"}
         for col in weeks:
             try:
                 d = float(cap_df.loc[cap_df["STAT"] == "Toplam Kapasite", col].iloc[0]) - float(
                     cap_df.loc[cap_df["STAT"] == "Kapasite İhtiyacı", col].iloc[0]
                 )
-                if sql_float_fark and not _is_a_col(col):
-                    fark_row[col] = round(d, DISPLAY_MAX_DECIMALS_NON_A)
+                if _is_a_col(col):
+                    fark_row[col] = int(round(d, 0))
                 else:
-                    fark_row[col] = round(d, 0)
+                    fark_row[col] = d if float_cap_mode else int(round(d, 0))
             except Exception:
                 fark_row[col] = 0
         cap_df = pd.concat([cap_df, pd.DataFrame([fark_row])], ignore_index=True)
@@ -484,14 +629,11 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         numeric_cols = [c for c in cap_df.columns if c != "STAT"]
         cumsum = cap_df.loc[cap_df["STAT"] == "Kapasite Farkı", numeric_cols].cumsum(axis=1)
         cum_row = {"STAT": "Kümülatif Toplam"}
-        cum_raw = cumsum.iloc[0].to_dict()
-        cum_row.update(cum_raw)
-        for k, v in list(cum_row.items()):
-            if k == "STAT" or not isinstance(v, (int, float)):
-                continue
-            if sql_float_fark and not _is_a_col(k):
-                cum_row[k] = round(v, DISPLAY_MAX_DECIMALS_NON_A)
-            else:
+        cum_row.update(cumsum.iloc[0].to_dict())
+        if not float_cap_mode:
+            for k, v in list(cum_row.items()):
+                if k == "STAT" or not isinstance(v, (int, float)):
+                    continue
                 cum_row[k] = round(v, 0)
         cap_df = pd.concat([cap_df, pd.DataFrame([cum_row])], ignore_index=True)
 
@@ -502,12 +644,21 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
             try:
                 tk = float(tk_row[col])
                 ui = float(ui_row[col])
-                doluluk_vals.append(round((ui / tk) * 100, 0) if tk != 0 else 0)
+                if float_cap_mode:
+                    doluluk_vals.append((ui / tk) * 100 if tk != 0 else 0.0)
+                else:
+                    doluluk_vals.append(round((ui / tk) * 100, 0) if tk != 0 else 0)
             except Exception:
                 doluluk_vals.append(0)
         doluluk_df = pd.DataFrame([doluluk_vals], columns=weeks)
         doluluk_df["STAT"] = "Doluluk Oranı(%)"
-        return _finalize_capacity_stat_like_dash(cap_df, doluluk_df, weeks, selected_units)
+        out = pd.concat([cap_df, doluluk_df], ignore_index=True)
+        try:
+            out.attrs["cumulative_mini"] = build_cumulative_mini_payload(out)
+        except Exception:
+            out.attrs["cumulative_mini"] = None
+        _apply_capacity_stat_display(out, weeks, selected_units)
+        return out
     except Exception as e:
         print(f"kapasite_data build_capacity_table_for_cc_workcenter hatası: {e}")
         return None

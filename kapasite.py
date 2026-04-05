@@ -206,12 +206,7 @@ HAS_ACCORDION_HEADER = hasattr(dbc, "AccordionHeader") and hasattr(dbc, "Accordi
 
 
 def generate_monthly_columns(selected_year=None):
-    """Aylık kolonlar (Öngörü).
-    format1/format4 kapasite için; verimlilik sadece yük tablosunda kolon olarak.
-
-    selected_year verilirse sadece seçilen yıla(lar)a ait ayları üretir.
-    selected_year None ise mevcut yıl + bir sonraki yıl üretilir.
-    """
+    
     today = datetime.today()
 
     # Normalizasyon: None -> [today, today+1], tek -> [tek], liste -> [liste]
@@ -476,7 +471,7 @@ def _clean_df_column_names(df):
 
 
 def _display_col_name(col_id, zero_first_state):
-    """Dashboard'da ZIP görünümüyle uyum için ilk tarih kolonu başlığını '0' göster."""
+    
     if not col_id:
         return "\u00a0"
 
@@ -500,8 +495,27 @@ def _display_col_name(col_id, zero_first_state):
     return col_id
 
 
+def _capacity_duration_table_columns(weeks, zero_first_state):
+    
+    cols = [{"name": "STAT", "id": "STAT", "hideable": False}]
+    dec_nona = kapasite_data.CAPACITY_DISPLAY_DEC_IHT_TOP_NON_A
+    for c in weeks:
+        is_a = str(c).strip().endswith("A")
+        prec = 0 if is_a else max(0, int(dec_nona))
+        cols.append(
+            {
+                "name": _display_col_name(c, zero_first_state),
+                "id": c,
+                "hideable": False,
+                "type": "numeric",
+                "format": Format(precision=prec, scheme=Scheme.fixed),
+            }
+        )
+    return cols
+
+
 def get_table_columns(table_name):
-    """Return set of column names for a table or empty set on error."""
+    
     if not table_name:
         return set()
     try:
@@ -618,7 +632,7 @@ def _fixed_pin_header_rule(column_id, min_w, max_w):
 
 
 def _fixed_pin_style_data_overrides(column_ids):
-    """Zebra (odd/even) kurallarından sonra eklenmeli; sabit kolonları soluk bırakmaz."""
+    
     return [
         {
             'if': {'column_id': cid},
@@ -1482,11 +1496,7 @@ def _clear_multi_cell_highlight_on_next_click(
     wc_kap_multi_flag,
     material_multi_flag,
 ):
-    """
-    Shift ile çoklu hücre seçildiğinde highlight göster.
-    Kullanıcı bir sonraki tıklamada o tablonun active_cell'ını değiştirirse,
-    çoklu highlight'ı tamamen kapat (selected_cells=[], active_cell=None).
-    """
+    
     # Varsayılan: hiçbir tabloyu değiştirme.
     out_cc_sel = no_update
     out_cc_active = no_update
@@ -1671,13 +1681,7 @@ def update_selection_summary(
     wc_kap_data, wc_kap_columns,
     mat_data, mat_columns,
 ):
-    """
-    Excel mantığı:
-    - selected_cells varken: o hücrelerin toplam/ortalaması
-    - selected_cells aynı satırda ve o satırdaki tüm kolonlar seçiliyse: tam satırın toplam/ortalaması
-    - selected_cells aynı sütunda ve o sütundaki tüm satırlar seçiliyse: tam sütunun toplam/ortalaması
-    - selected_cells yok ama active_cell varsa: aktif hücre
-    """
+    
     def _normalize_active(active, cols):
         if not active or not isinstance(active, dict):
             return None
@@ -1899,10 +1903,7 @@ def toggle_costcenter_columns(n_clicks, selected_years, kolon_sum, kolon_list, k
         raise PreventUpdate
 
     def _split_sql_select_list(select_list: str):
-        """
-        SQL SELECT listesi virgül ayırır, ama virgül parantez içinde ise bölmez.
-        Özellikle format4_graph içindeki DECIMAL(18, 3) gibi durumlar için gerekli.
-        """
+        
         if not select_list:
             return []
         parts = []
@@ -2614,7 +2615,7 @@ def update_workcenter(selected_workcenter, selected_capgrup,
                 _coerce_numeric_records(cap_data, weeks_cap)
                 _blank_zero_cells_in_records(cap_data, weeks_cap)
                 zero_first_state = {"available": table_name in ("VLFCAPFINALPIVOT", "VLFCAPFINALSIPARIS"), "first_done": False}
-                cap_cols_def = [{'name': 'STAT', 'id': 'STAT', 'hideable': False}] + [{'name': _display_col_name(c, zero_first_state), 'id': c, 'hideable': False} for c in weeks_cap]
+                cap_cols_def = _capacity_duration_table_columns(weeks_cap, zero_first_state)
                 cap_wc_style = [
                     {'if': {'row_index': 'odd'},  'backgroundColor': '#eef4ff'},
                     {'if': {'row_index': 'even'}, 'backgroundColor': '#ffffff'},
@@ -2954,12 +2955,7 @@ def download_malzeme(n_clicks, kolon_sum_filtered, kolon_sum_raw, kolon_list_fil
         raise PreventUpdate
 
 
-## row highlight callbacks moved into the main table callbacks to avoid duplicate Outputs
 
-
-# ── Accordion → Panel açma/kapama (Python serverside) ───────────────────────
-# active_item değiştiğinde ilgili panel'e kap-panel-visible class'ı ekler;
-# çarpı (✕) veya kapasite-close-all tıklanınca paneller kapanır.
 @app.callback(
     Output("panel-costcenter",  "className"),
     Output("panel-workcenter",  "className"),
@@ -3014,11 +3010,7 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
                                       kolon_list_filtered, kolon_list_raw,
                                       kolon_sumb_filtered, kolon_sumb_raw,
                                       table_name, capacity_table_name):
-    # selected_year sadece callback tetiklemek için; gerçek içerik filtered_kolon_* ile geliyor.
-    _ = selected_year
-    # Kapasite Süresi (Costcenter) tablosu kolonları için:
-    # "Kolonları Göster/Gizle" butonu hidden_columns üzerinden A kolonlarını açıp kapatsın.
-    # Bu yüzden A kolonları filtered state yüzünden daha baştan filtrelenmesin; raw kolonları kullanıyoruz.
+    
     kolon_sum = kolon_sum_raw or kolon_sum_filtered
     kolon_list = kolon_list_raw or kolon_list_filtered
     kolon_sumb = kolon_sumb_raw or kolon_sumb_filtered
@@ -3058,7 +3050,7 @@ def update_costcenter_capacity_table(selected_costcenter, selected_capgrp,
         _blank_zero_cells_in_records(cap_records, weeks)
 
         zero_first_state = {"available": table_name in ("VLFCAPFINALPIVOT", "VLFCAPFINALSIPARIS"), "first_done": False}
-        cols = [{'name': 'STAT', 'id': 'STAT', 'hideable': False}] + [{'name': _display_col_name(c, zero_first_state), 'id': c, 'hideable': False} for c in weeks]
+        cols = _capacity_duration_table_columns(weeks, zero_first_state)
 
         sdc = [
             {'if': {'row_index': 'odd'},  'backgroundColor': '#eef4ff'},

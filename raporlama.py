@@ -599,13 +599,32 @@ def _format_capacity_number(num_val, col_name, selected_units):
 
 
 def _excel_number_format_for_capacity_col(col_name, selected_units):
-    
+    """Malzeme / yük hafta sütunları (saat-vardiya: en fazla DISPLAY_MAX_DECIMALS_NON_A ondalık)."""
     if str(col_name).strip().endswith("A"):
         return "0"
     su = selected_units or []
     if "hours" in su or "shifts" in su:
         return "0." + ("#" * kapasite_data.DISPLAY_MAX_DECIMALS_NON_A)
     return "0"
+
+
+def _excel_number_format_capacity_stat_row(stat_str, col_name, selected_units):
+    """Kapasite süresi STAT tablosu: satır/kolon tipine göre Excel sayı biçimi (CAPACITY_DISPLAY_DEC_*)."""
+    if str(col_name).strip().endswith("A"):
+        return "0"
+    su = selected_units or []
+    if "hours" not in su and "shifts" not in su:
+        return "0"
+    st = (stat_str or "").strip()
+    if st in ("Kapasite İhtiyacı", "Toplam Kapasite"):
+        nd = kapasite_data.CAPACITY_DISPLAY_DEC_IHT_TOP_NON_A
+        return "0." + ("0" * nd) if nd > 0 else "0"
+    nd = (
+        kapasite_data.CAPACITY_DISPLAY_DEC_DOLULUK
+        if st == "Doluluk Oranı(%)"
+        else kapasite_data.CAPACITY_DISPLAY_DEC_FARK_CUM_NON_A
+    )
+    return "0." + ("0" * nd) if nd > 0 else "0"
 
 
 def _excel_safe_value(val):
@@ -805,6 +824,32 @@ def _extract_kumulatif_row_from_cap_df(cap_df, costcenter, workcenter="Tümü", 
     return None
 
 
+def _format_cumulative_mini_need_total_excel(val, col_name, selected_units):
+    """Özet kartı küm. ihtiyaç/toplam: ana kapasite tablosu ihtiyaç satırı ile aynı gösterim kuralı."""
+    su = selected_units or []
+    fv = _parse_cell_to_float(val)
+    if fv is None:
+        return None
+    if str(col_name).strip().endswith("A"):
+        return int(round(fv, 0))
+    if "hours" in su or "shifts" in su:
+        rv = round(fv, kapasite_data.CAPACITY_DISPLAY_DEC_IHT_TOP_NON_A)
+        return int(rv) if kapasite_data.CAPACITY_DISPLAY_DEC_IHT_TOP_NON_A == 0 else rv
+    return int(round(fv, 0))
+
+
+def _format_cumulative_mini_ratio_display(val, selected_units):
+    """Özet oran %: kapasite doluluk satırı ile aynı yuvarlama (CAPACITY_DISPLAY_DEC_DOLULUK)."""
+    _rv = _parse_cell_to_float(val)
+    if _rv is None:
+        return None, None
+    su = selected_units or []
+    if "hours" not in su and "shifts" not in su:
+        return int(round(_rv, 0)), 0
+    dec = kapasite_data.CAPACITY_DISPLAY_DEC_DOLULUK
+    return round(_rv, dec), dec
+
+
 def _build_cumulative_ratio_from_cap_df(cap_df):
     
     if cap_df is None or cap_df.empty or "STAT" not in cap_df.columns:
@@ -891,7 +936,17 @@ def _write_cumulative_mini_table(
     from openpyxl.styles import Alignment, PatternFill
     from openpyxl.utils import get_column_letter
 
-    cols, cum_need, cum_total, cum_ratio = _build_cumulative_ratio_from_cap_df(cap_df)
+    cols, cum_need, cum_total, cum_ratio = None, None, None, None
+    try:
+        pl = cap_df.attrs.get("cumulative_mini") if hasattr(cap_df, "attrs") and cap_df.attrs else None
+        if pl:
+            cols, cum_need, cum_total, cum_ratio = kapasite_data.filter_cumulative_mini_payload(
+                pl, cap_df.columns
+            )
+    except Exception:
+        pass
+    if not cols:
+        cols, cum_need, cum_total, cum_ratio = _build_cumulative_ratio_from_cap_df(cap_df)
     if not cols:
         return header_row + 2
 
@@ -987,18 +1042,23 @@ def _write_cumulative_mini_table(
             if v is None:
                 cc.value = None
             elif is_ratio:
-                _rv = _parse_cell_to_float(v)
-                if _rv is None:
+                p_val, p_dec = _format_cumulative_mini_ratio_display(v, selected_units)
+                if p_val is None:
                     cc.value = None
+                    _rv = None
                 else:
-                    p_dec = _unit_decimals(selected_units)
-                    p_val = round(_rv, p_dec)
+                    _rv = float(p_val)
                     cc.value = f"%{int(p_val)}%" if p_dec == 0 else f"%{p_val:.{p_dec}f}%"
             else:
-                _nv = _parse_cell_to_float(v)
-                cc.value = _format_capacity_number(_nv, cols[i], selected_units)
+                cc.value = _format_cumulative_mini_need_total_excel(v, cols[i], selected_units)
                 if cc.value is not None:
-                    cc.number_format = _excel_number_format_for_capacity_col(cols[i], selected_units)
+                    if str(cols[i]).strip().endswith("A"):
+                        cc.number_format = "0"
+                    elif selected_units and ("hours" in selected_units or "shifts" in selected_units):
+                        nd = kapasite_data.CAPACITY_DISPLAY_DEC_IHT_TOP_NON_A
+                        cc.number_format = "0" if nd <= 0 else ("0." + ("0" * nd))
+                    else:
+                        cc.number_format = "0"
             cc.alignment = Alignment(horizontal="right", vertical="center")
             if is_ratio:
                 last = i == len(values) - 1
@@ -1164,7 +1224,13 @@ def _write_table_to_sheet(ws, start_row, df, s, title=None, is_section_title=Fal
             cell = ws.cell(row=row, column=c_idx, value=_excel_safe_value(write_val))
             if c_idx > 1 and write_val is not None:
                 col_name = df.columns[c_idx - 1]
-                if is_capacity_table or _is_date_col(col_name):
+                if is_capacity_table:
+                    cell.number_format = _excel_number_format_capacity_stat_row(
+                        str(first_col_val).strip() if first_col_val is not None else "",
+                        col_name,
+                        selected_units,
+                    )
+                elif _is_date_col(col_name):
                     cell.number_format = _excel_number_format_for_capacity_col(col_name, selected_units)
 
             # Temel stil
