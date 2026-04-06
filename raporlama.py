@@ -190,8 +190,17 @@ def _print_rapor_timing_report(zip_wall_sec, prof, per_excel_rows):
         print("\n".join(lines).encode("ascii", "replace").decode("ascii"))
 
 
-def _send_report_notification_email(status, detail, created_reports=None, attachment_bytes=None, attachment_name="kapasite_raporlar.zip"):
-    
+def _send_report_notification_email(
+    status,
+    detail,
+    created_reports=None,
+    attachment_bytes=None,
+    attachment_name="kapasite_raporlar.zip",
+    zip_location_info=None,
+    is_scheduled_job_email=False,
+):
+    """Bildirim e-postası. Zamanlanmış görevde (is_scheduled_job_email) ZIP genelde eklenmez; yol metinde verilir."""
+
     created_reports = created_reports or []
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     subject = f"Kapasite Raporlama - {status}"
@@ -202,6 +211,15 @@ def _send_report_notification_email(status, detail, created_reports=None, attach
         f"Detay: {detail}\n"
         f"Raporlar: {', '.join(created_reports) if created_reports else '-'}\n"
     )
+    if zip_location_info and str(zip_location_info).strip():
+        body += "\n---\nZIP / rapor konumu:\n" + str(zip_location_info).strip() + "\n"
+    if is_scheduled_job_email:
+        body += (
+            "\nZamanlanmis gorev: ZIP e-postaya eklenmez (mesaj boyutu limiti). "
+            "Raporu yukaridaki tam dosya yolundan kopyalayin.\n"
+            f"Guncel calistirma `{getattr(config, 'SCHEDULED_REPORT_ZIP_BASENAME', 'kapasite_raporlar_latest.zip')}` "
+            "dosyasinin uzerine yazar; ayni klasorde kalan diger `kapasite_raporlar*.zip` dosyalari silinir.\n"
+        )
 
     to_list, cc_list, bcc_list = _get_notify_recipients()
     recipient_text = ", ".join(to_list + cc_list + bcc_list) if (to_list or cc_list or bcc_list) else "-"
@@ -227,9 +245,10 @@ def _send_report_notification_email(status, detail, created_reports=None, attach
         if bcc_list:
             msg["Bcc"] = ", ".join(bcc_list)
         msg.set_content(body)
-        if attachment_bytes:
+        attach_payload = None if is_scheduled_job_email else attachment_bytes
+        if attach_payload:
             msg.add_attachment(
-                attachment_bytes,
+                attach_payload,
                 maintype="application",
                 subtype="zip",
                 filename=attachment_name,
@@ -268,10 +287,11 @@ def _send_report_notification_email(status, detail, created_reports=None, attach
             mail.CC = ";".join(cc_list)
         mail.Subject = subject
         mail.Body = body
-        if attachment_bytes:
+        attach_payload = None if is_scheduled_job_email else attachment_bytes
+        if attach_payload:
             import tempfile
             with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
-                tmp.write(attachment_bytes)
+                tmp.write(attach_payload)
                 tmp_path = tmp.name
             try:
                 mail.Attachments.Add(tmp_path)

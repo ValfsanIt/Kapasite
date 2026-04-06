@@ -38,6 +38,7 @@ RAPORLAMA_NOTIFY_CC = ["itstajyer@valfsan.com.tr"]
 
 
 
+
 reengen_username = "takgun@valfsan.com.tr"
 reengen_password = '1234Ta1234'
 reengen_company = 'valfsan'
@@ -45,6 +46,12 @@ reengen_company = 'valfsan'
 
 
 project_directory = os.path.dirname(os.path.abspath(__file__))
+
+# Zamanlanmış Kapasite ZIP (report_job): tek güncel dosya.
+# Öncelik: ortam değişkeni KAP_REPORT_OUT_DIR (tanımlıysa bu yol yerine o kullanılır).
+# Her çalışmada aynı dosya adı üzerine yazılır; klasördeki diğer kapasite_raporlar*.zip silinir.
+SCHEDULED_REPORT_OUTPUT_DIR = r"\\Vlffile01\data\16- ORTAK\KAPASITE_RAPOR"
+SCHEDULED_REPORT_ZIP_BASENAME = "kapasite_raporlar_latest.zip"
 
 directory = os.path.join(project_directory, "queries")
 dirofquery = os.path.join(directory, "query2.txt")
