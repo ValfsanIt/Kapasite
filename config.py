@@ -49,9 +49,11 @@ project_directory = os.path.dirname(os.path.abspath(__file__))
 
 # Zamanlanmış Kapasite ZIP (report_job): tek güncel dosya.
 # Öncelik: ortam değişkeni KAP_REPORT_OUT_DIR (tanımlıysa bu yol yerine o kullanılır).
-# Her çalışmada aynı dosya adı üzerine yazılır; klasördeki diğer kapasite_raporlar*.zip silinir.
+# Her çalışmada aynı dosya adı üzerine yazılır; kök klasördeki diğer kapasite_raporlar*.zip silinir.
+# Pazartesi: ek olarak SCHEDULED_REPORT_MONDAY_ARCHIVE_SUBDIR altına tarihli kopya yazılır (birikir; silinmez).
 SCHEDULED_REPORT_OUTPUT_DIR = r"\\Vlffile01\data\16- ORTAK\KAPASITE_RAPOR"
 SCHEDULED_REPORT_ZIP_BASENAME = "kapasite_raporlar_latest.zip"
+SCHEDULED_REPORT_MONDAY_ARCHIVE_SUBDIR = "Pazartesi_raporlari"
 
 directory = os.path.join(project_directory, "queries")
 dirofquery = os.path.join(directory, "query2.txt")

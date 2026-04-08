@@ -48,19 +48,41 @@ def _save_zip_outputs(zip_bytes):
 
     keep_lower = zip_basename.lower()
     for name in os.listdir(out_dir):
+        p = os.path.join(out_dir, name)
+        if not os.path.isfile(p):
+            continue
         if not name.lower().endswith(".zip"):
             continue
         if name.lower() == keep_lower:
             continue
         if not name.lower().startswith("kapasite_raporlar"):
             continue
-        old_path = os.path.join(out_dir, name)
         try:
-            os.remove(old_path)
+            os.remove(p)
         except Exception:
             pass
 
+    _save_monday_archive_copy(zip_bytes, out_dir)
+
     return latest_path
+
+
+def _save_monday_archive_copy(zip_bytes, out_dir):
+    """Pazartesi günü çalışırsa alt klasöre tarihli ZIP kopyası (birikir; önceki haftalar silinmez)."""
+    sub = getattr(config, "SCHEDULED_REPORT_MONDAY_ARCHIVE_SUBDIR", "") or ""
+    sub = str(sub).strip()
+    if not sub:
+        return None
+    if datetime.now().weekday() != 0:
+        return None
+    arch = os.path.join(out_dir, sub)
+    os.makedirs(arch, exist_ok=True)
+    name = datetime.now().strftime("kapasite_raporlar_%Y-%m-%d.zip")
+    path = os.path.normpath(os.path.join(arch, name))
+    with open(path, "wb") as f:
+        f.write(zip_bytes)
+    print(f"[report_job] Pazartesi arsivi: {path}", flush=True)
+    return path
 
 
 def _zip_location_hint_success(saved_abs_path, zip_bytes):
