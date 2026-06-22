@@ -2039,7 +2039,9 @@ def build_raporlama_zip(ag_instance, hidden_columns=None, table_columns=None):
                     traceback.print_exc()
                     continue
                 if period == "weekly":
-                    columns_dict = kapasite_data.generate_weekly_columns()
+                    columns_dict = kapasite_data.generate_weekly_columns_filtered(
+                        ag_instance, table_name, capacity_table_name
+                    )
                 else:
                     columns_dict = kapasite_data.generate_monthly_columns_filtered(
                         ag_instance, table_name, capacity_table_name

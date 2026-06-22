@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta
 import re
+import numpy as np
 import pandas as pd
 
 
@@ -19,6 +20,26 @@ def get_kolon_list_from_format3(format3_str):
     if not format3_str:
         return []
     return [x.strip() for x in format3_str.split(",") if x.strip()]
+
+
+def _df_dedupe_columns(df):
+    """Aynı ada sahip sütunlar .at / Int64 atamalarında Series döndürüp hataya yol açar."""
+    if df is None or df.empty:
+        return df
+    if not df.columns.duplicated().any():
+        return df
+    return df.loc[:, ~df.columns.duplicated(keep="first")].copy()
+
+
+def _to_scalar(x):
+    """DataFrame hücresi / .at sonucu bazen tek satırlı Series olabilir."""
+    if x is None:
+        return None
+    if isinstance(x, pd.Series):
+        if x.empty:
+            return None
+        x = x.iloc[0]
+    return x
 
 
 def _sql_bracket_table(name):
@@ -45,23 +66,39 @@ def _div_safe(df, start_col_index, divisor):
     if df is None or df.empty or start_col_index >= df.shape[1]:
         return
     target_cols = list(df.columns[start_col_index:])
-    
+    div = float(divisor)
     for col in target_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
-    df.loc[:, target_cols] = df.loc[:, target_cols].div(divisor)
+        s = df.loc[:, col]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        v = np.ravel(np.asarray(pd.to_numeric(s, errors="coerce"), dtype=np.float64)) / div
+        # int64 SQL sütununa ham ndarray atamak pandas'ta 'Invalid value ... for dtype int64' üretebilir
+        df[col] = pd.Series(v, index=df.index, dtype="float64")
+
+
+def _effective_time_units(selected_units):
+    """Checklist çoklu seçim gönderebilir; kapasite SQL'i tek birim bekler. selected_table ile aynı kural: son seçilen geçerli."""
+    su = list(selected_units) if selected_units else []
+    if len(su) > 1:
+        return [su[-1]]
+    return su
 
 
 def _apply_cap_work_unit_like_dash(sum_df_cap_work, selected_units):
-    
-    if sum_df_cap_work is None or sum_df_cap_work.empty or sum_df_cap_work.shape[1] < 2:
+    """VLFVARDIYASURE kaynaklı toplam kapasite değerleri dakikadır; saat/vardiyada tüm sayısal kolonlara böl."""
+    if sum_df_cap_work is None or sum_df_cap_work.empty:
         return
     su = selected_units or []
+    n = sum_df_cap_work.shape[1]
+    if n == 0:
+        return
     if "hours" in su or "shifts" in su:
-        sub = sum_df_cap_work.iloc[:, 1:].apply(pd.to_numeric, errors="coerce").astype("float64")
-        if "hours" in su:
-            sum_df_cap_work.iloc[:, 1:] = sub / 60.0
-        else:
-            sum_df_cap_work.iloc[:, 1:] = sub / 510.0
+        factor = 60.0 if "hours" in su else 510.0
+        for c in list(sum_df_cap_work.columns[:n]):
+            v = np.ravel(
+                np.asarray(pd.to_numeric(sum_df_cap_work[c], errors="coerce"), dtype=np.float64)
+            ) / factor
+            sum_df_cap_work[c] = pd.Series(v, index=sum_df_cap_work.index, dtype="float64")
     else:
         _to_numeric_slice(sum_df_cap_work, 0)
 
@@ -83,7 +120,9 @@ def _select_sum_with_unit(kolon_list, selected_units):
             continue
         col = str(col).strip()
         if divisor:
-            parts.append(f"SUM([{col}])/{divisor} AS [{col}]")
+            parts.append(
+                f"CAST(SUM(CAST([{col}] AS FLOAT)) AS FLOAT)/CAST({float(divisor)} AS FLOAT) AS [{col}]"
+            )
         else:
             parts.append(f"SUM([{col}]) AS [{col}]")
     return ", ".join(parts)
@@ -130,14 +169,36 @@ def _prepare_capacity_source_numbers(sum_df, id_cols, selected_units):
     if "hours" not in su and "shifts" not in su:
         _format_numeric_cols_by_unit(sum_df, num, selected_units)
         return
+    n = len(sum_df)
     for col in num:
         if col not in sum_df.columns:
             continue
-        ser = pd.to_numeric(sum_df[col], errors="coerce")
+        s = sum_df.loc[:, col]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        arr = np.asarray(pd.to_numeric(s, errors="coerce"), dtype=np.float64).reshape(-1)
+        if arr.size != n:
+            if arr.size == 1:
+                arr = np.full(n, arr[0], dtype=np.float64)
+            else:
+                out = np.full(n, np.nan, dtype=np.float64)
+                out[: min(arr.size, n)] = arr[:n]
+                arr = out
         if _is_a_col(col):
-            sum_df[col] = ser.round(0).astype("Int64")
+            int_list = []
+            for x in np.ravel(arr):
+                xv = float(x)
+                if np.isnan(xv):
+                    int_list.append(pd.NA)
+                else:
+                    int_list.append(int(round(xv, 0)))
+            sum_df[col] = pd.Series(int_list, index=sum_df.index, dtype="Int64")
         else:
-            sum_df[col] = ser.astype("float64")
+            sum_df[col] = pd.Series(
+                np.ravel(arr).astype(np.float64, copy=False),
+                index=sum_df.index,
+                dtype="float64",
+            )
 
 
 def _is_date_col_cap(col_name):
@@ -234,21 +295,27 @@ def _apply_capacity_stat_display(out, weeks, selected_units):
     
     if out is None or out.empty or not weeks or "STAT" not in out.columns:
         return out
+    out = _df_dedupe_columns(out)
     su = selected_units or []
     if "hours" not in su and "shifts" not in su:
         return out
     for idx in out.index:
-        stat = str(out.at[idx, "STAT"]).strip()
+        stat = str(_to_scalar(out.at[idx, "STAT"]) or "").strip()
         for col in weeks:
             if col not in out.columns:
                 continue
-            v = out.at[idx, col]
+            v = _to_scalar(out.at[idx, col])
             try:
-                if pd.isna(v):
+                if v is None or pd.isna(v):
                     continue
             except (TypeError, ValueError):
                 pass
-            fv = float(v)
+            try:
+                fv = float(pd.to_numeric(v, errors="coerce"))
+            except (TypeError, ValueError):
+                continue
+            if pd.isna(fv):
+                continue
             if _is_a_col(col):
                 out.at[idx, col] = int(round(fv, 0))
             elif stat == "Kapasite İhtiyacı" or stat == "Toplam Kapasite":
@@ -290,6 +357,20 @@ def _malzeme_div_start_col_index(df):
     return len(df.columns)
 
 
+def _is_week_column_name(name):
+    s = str(name).strip()
+    if s.endswith("A"):
+        s = s[:-1]
+    parts = s.split("-")
+    return (
+        len(parts) == 2
+        and len(parts[0]) == 4
+        and parts[0].isdigit()
+        and len(parts[1]) == 2
+        and parts[1].isdigit()
+    )
+
+
 def generate_weekly_columns():
     
     start_date = datetime.now() - timedelta(weeks=1)
@@ -315,6 +396,69 @@ def generate_weekly_columns():
         "format2": ", ".join(format2),
         "format3": ", ".join(format3),
         "format4": ", ".join(format4),
+    }
+
+
+def generate_weekly_columns_filtered(ag_instance, table_name, capacity_table_name):
+    """Haftalik rapor kolonlari: yalnizca SQL tablosunda mevcut haftalari kullan (Dash ile uyumlu).
+
+    Olmayan son hafta (or. Pazartesi 2026-43) SQL'i dusurmez; ZIP bos kalmaz.
+    """
+    raw = generate_weekly_columns()
+    table_set = get_table_columns(ag_instance, table_name)
+    cap_set = get_table_columns(ag_instance, capacity_table_name)
+    if not table_set and not cap_set:
+        return raw
+
+    format1, format2, format3, format4 = [], [], [], []
+    start_date = datetime.now() - timedelta(weeks=1)
+    for i in range(19):
+        week_start = start_date + timedelta(weeks=i)
+        year, week_num, _ = week_start.isocalendar()
+        wk = f"{year}-{str(week_num).zfill(2)}"
+        if wk not in table_set or f"{wk}A" not in table_set:
+            continue
+        format2.append(f"SUM([{wk}]) AS [{wk}], SUM([{wk}A]) AS [{wk}A]")
+        format3.append(wk)
+        format3.append(f"{wk}A")
+        if i == 0:
+            format1.append(f"0 AS [{wk}]")
+            format4.append(f"0 AS [{wk}]")
+        else:
+            if wk in cap_set:
+                format1.append(f"SUM(B.[{wk}]) AS [{wk}]")
+            else:
+                format1.append(f"0 AS [{wk}]")
+            format4.append(
+                f"CAST(CEILING((CAST(SUM(A.[{wk}]) AS DECIMAL(18, 3))/CAST(SUM(B.[{wk}]) AS DECIMAL(18, 3)))*100) AS int) AS [{wk}]"
+            )
+
+    if not format2 and table_set:
+        week_bases = sorted(
+            c for c in table_set
+            if _is_week_column_name(c) and not str(c).endswith("A") and f"{c}A" in table_set
+        )
+        for idx, wk in enumerate(week_bases):
+            format2.append(f"SUM([{wk}]) AS [{wk}], SUM([{wk}A]) AS [{wk}A]")
+            format3.append(wk)
+            format3.append(f"{wk}A")
+            if idx == 0:
+                format1.append(f"0 AS [{wk}]")
+                format4.append(f"0 AS [{wk}]")
+            else:
+                if wk in cap_set:
+                    format1.append(f"SUM(B.[{wk}]) AS [{wk}]")
+                else:
+                    format1.append(f"0 AS [{wk}]")
+                format4.append(
+                    f"CAST(CEILING((CAST(SUM(A.[{wk}]) AS DECIMAL(18, 3))/CAST(SUM(B.[{wk}]) AS DECIMAL(18, 3)))*100) AS int) AS [{wk}]"
+                )
+
+    return {
+        "format1": ", ".join(format1) if format1 else raw["format1"],
+        "format2": ", ".join(format2) if format2 else raw["format2"],
+        "format3": ", ".join(format3) if format3 else raw["format3"],
+        "format4": ", ".join(format4) if format4 else raw["format4"],
     }
 
 
@@ -439,9 +583,17 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         else:
             sub_extra = ""
             where_extra = ""
-        selected_units = selected_units or ["hours"]
-        prediv_ihtiyac = _select_sum_with_unit(kolon_list, selected_units)
-        ihtiyac_select = prediv_ihtiyac if prediv_ihtiyac else kolon_sum
+        selected_units = _effective_time_units(selected_units)
+        if not selected_units:
+            selected_units = ["minutes"]
+        # Saat/vardiya: pivot kolonları dakikadır. SQL'de kolon bazlı SUM/CAST yerine
+        # (dakika ile aynı) format2 kolon_sum sorgusu + pandas'ta /60 veya /510 — SQL uyumluluğu için.
+        if "hours" in selected_units or "shifts" in selected_units:
+            prediv_ihtiyac = ""
+            ihtiyac_select = kolon_sum
+        else:
+            prediv_ihtiyac = _select_sum_with_unit(kolon_list, selected_units)
+            ihtiyac_select = prediv_ihtiyac if prediv_ihtiyac else kolon_sum
         tn = _sql_bracket_table(table_name)
         ctn = _sql_bracket_table(capacity_table_name)
         ihtiyac_sql = (
@@ -457,6 +609,8 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         sum_df_cap_work = ag_instance.run_query(cap_work_sql)
         if sum_df is None or sum_df.empty or sum_df_cap_work is None or sum_df_cap_work.empty:
             return None
+        sum_df = _df_dedupe_columns(sum_df)
+        sum_df_cap_work = _df_dedupe_columns(sum_df_cap_work)
 
         if not prediv_ihtiyac:
             if "hours" in selected_units:
@@ -471,15 +625,17 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         weeks = [c for c in kolon_list if c in sum_df.columns]
         if not weeks:
             weeks = [c for c in sum_df.columns if c not in ("STAND", "STAT")]
+        weeks = list(dict.fromkeys(weeks))
         filtered_sum_df = sum_df[["STAT"] + weeks].copy()
 
         if sum_df_cap_work.shape[1] > 0:
             _apply_cap_work_unit_like_dash(sum_df_cap_work, selected_units)
-            cap_work_numeric = [c for c in sum_df_cap_work.columns if c not in ("STAND",)]
-            _prepare_capacity_source_numbers(sum_df_cap_work, ("STAND",), selected_units)
+            _prepare_capacity_source_numbers(sum_df_cap_work, (), selected_units)
 
         toplam_row = {"STAT": "Toplam Kapasite"}
-        toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
+        _row0 = sum_df_cap_work.iloc[0]
+        for _c in sum_df_cap_work.columns:
+            toplam_row[_c] = _to_scalar(_row0[_c])
         cap_df = pd.concat([filtered_sum_df, pd.DataFrame([toplam_row])], ignore_index=True)
 
         su = selected_units or []
@@ -501,7 +657,10 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         numeric_cols = [c for c in cap_df.columns if c != "STAT"]
         cumsum = cap_df.loc[cap_df["STAT"] == "Kapasite Farkı", numeric_cols].cumsum(axis=1)
         cum_row = {"STAT": "Kümülatif Toplam"}
-        cum_row.update(cumsum.iloc[0].to_dict())
+        _cs0 = cumsum.iloc[0]
+        for _k in numeric_cols:
+            if _k in _cs0.index:
+                cum_row[_k] = _to_scalar(_cs0[_k])
         if not float_cap_mode:
             for k, v in list(cum_row.items()):
                 if k == "STAT" or not isinstance(v, (int, float)):
@@ -514,8 +673,8 @@ def build_capacity_table_for_cc(ag_instance, table_name, capacity_table_name, co
         doluluk_vals = []
         for col in weeks:
             try:
-                tk = float(tk_row[col])
-                ui = float(ui_row[col])
+                tk = float(pd.to_numeric(_to_scalar(tk_row[col]), errors="coerce"))
+                ui = float(pd.to_numeric(_to_scalar(ui_row[col]), errors="coerce"))
                 if float_cap_mode:
                     doluluk_vals.append((ui / tk) * 100 if tk != 0 else 0.0)
                 else:
@@ -565,9 +724,15 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         else:
             sub_extra = ""
             where_extra = ""
-        selected_units = selected_units or ["hours"]
-        prediv_ihtiyac = _select_sum_with_unit(kolon_list, selected_units)
-        ihtiyac_select = prediv_ihtiyac if prediv_ihtiyac else kolon_sum
+        selected_units = _effective_time_units(selected_units)
+        if not selected_units:
+            selected_units = ["minutes"]
+        if "hours" in selected_units or "shifts" in selected_units:
+            prediv_ihtiyac = ""
+            ihtiyac_select = kolon_sum
+        else:
+            prediv_ihtiyac = _select_sum_with_unit(kolon_list, selected_units)
+            ihtiyac_select = prediv_ihtiyac if prediv_ihtiyac else kolon_sum
         tn = _sql_bracket_table(table_name)
         ctn = _sql_bracket_table(capacity_table_name)
         ihtiyac_sql = (
@@ -585,6 +750,8 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         sum_df_cap_work = ag_instance.run_query(cap_work_sql)
         if sum_df is None or sum_df.empty or sum_df_cap_work is None or sum_df_cap_work.empty:
             return None
+        sum_df = _df_dedupe_columns(sum_df)
+        sum_df_cap_work = _df_dedupe_columns(sum_df_cap_work)
 
         if not prediv_ihtiyac:
             if "hours" in selected_units:
@@ -599,15 +766,17 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         weeks = [c for c in kolon_list if c in sum_df.columns]
         if not weeks:
             weeks = [c for c in sum_df.columns if c not in ("CAPWORK", "STAT")]
+        weeks = list(dict.fromkeys(weeks))
         filtered_sum_df = sum_df[["STAT"] + weeks].copy()
 
         if sum_df_cap_work.shape[1] > 0:
             _apply_cap_work_unit_like_dash(sum_df_cap_work, selected_units)
-            cap_work_numeric = [c for c in sum_df_cap_work.columns if c not in ("STAND", "CAPWORK")]
-            _prepare_capacity_source_numbers(sum_df_cap_work, ("STAND", "CAPWORK"), selected_units)
+            _prepare_capacity_source_numbers(sum_df_cap_work, (), selected_units)
 
         toplam_row = {"STAT": "Toplam Kapasite"}
-        toplam_row.update(sum_df_cap_work.iloc[0].to_dict())
+        _row0w = sum_df_cap_work.iloc[0]
+        for _c in sum_df_cap_work.columns:
+            toplam_row[_c] = _to_scalar(_row0w[_c])
         cap_df = pd.concat([filtered_sum_df, pd.DataFrame([toplam_row])], ignore_index=True)
 
         su = selected_units or []
@@ -629,7 +798,10 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         numeric_cols = [c for c in cap_df.columns if c != "STAT"]
         cumsum = cap_df.loc[cap_df["STAT"] == "Kapasite Farkı", numeric_cols].cumsum(axis=1)
         cum_row = {"STAT": "Kümülatif Toplam"}
-        cum_row.update(cumsum.iloc[0].to_dict())
+        _cs0w = cumsum.iloc[0]
+        for _k in numeric_cols:
+            if _k in _cs0w.index:
+                cum_row[_k] = _to_scalar(_cs0w[_k])
         if not float_cap_mode:
             for k, v in list(cum_row.items()):
                 if k == "STAT" or not isinstance(v, (int, float)):
@@ -642,8 +814,8 @@ def build_capacity_table_for_cc_workcenter(ag_instance, table_name, capacity_tab
         doluluk_vals = []
         for col in weeks:
             try:
-                tk = float(tk_row[col])
-                ui = float(ui_row[col])
+                tk = float(pd.to_numeric(_to_scalar(tk_row[col]), errors="coerce"))
+                ui = float(pd.to_numeric(_to_scalar(ui_row[col]), errors="coerce"))
                 if float_cap_mode:
                     doluluk_vals.append((ui / tk) * 100 if tk != 0 else 0.0)
                 else:

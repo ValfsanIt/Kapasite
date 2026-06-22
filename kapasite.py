@@ -304,7 +304,9 @@ def _select_sum_with_unit(kolon_list, selected_units):
         if not col or not str(col).strip():
             continue
         if divisor:
-            parts.append(f"SUM([{col}])/{divisor} AS [{col}]")
+            parts.append(
+                f"CAST(SUM(CAST([{col}] AS FLOAT)) AS FLOAT)/CAST({float(divisor)} AS FLOAT) AS [{col}]"
+            )
         else:
             parts.append(f"SUM([{col}]) AS [{col}]")
     return ", ".join(parts)
@@ -1345,6 +1347,7 @@ def selected_table(n,selected_units,selected_type,selected_year,current_table_na
     else:
         raise PreventUpdate
 
+    selected_units = list(selected_units) if selected_units is not None else []
     if len(selected_units) > 1:
         selected_units = [selected_units[-1]]
 
